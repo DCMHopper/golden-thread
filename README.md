@@ -4,6 +4,8 @@
 ### ❗Warning: this app can decrypt sensitive Signal data
 ### ❗Warning: this repo is not actively maintained
 
+![Golden Thread Screenshot](/docs/app_example_screenshot.png)
+
 ## Overview
 Golden Thread is a view-only interface for Signal messages, built on [signalbackup-tools](https://github.com/bepaald/signalbackup-tools) for Mac. Its features include:
 - GUI-based Signal backup decryption (Android only).
