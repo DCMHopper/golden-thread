@@ -1,0 +1,77 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# IDE & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+.vs/
+
+# Node/npm
+node_modules/
+.npm-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Rust
+core/target/
+app/src-tauri/target/
+**/*.rs.bk
+Cargo.lock.msrv
+
+# Vite/Tauri
+dist/
+app/dist/
+app/src-tauri/gen/
+app/src-tauri/WixTools
+
+# Vendor (external dependencies)
+vendor/
+
+# Logs
+*.log
+logs/
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Build artifacts
+*.exe
+*.out
+*.app
+*.dmg
+*.pkg
+
+# Backup files
+*.bak
+*.backup
+*.tmp
+*.temp
+
+# Testing
+coverage/
+.nyc_output/

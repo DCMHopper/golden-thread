@@ -1,0 +1,31 @@
+From 7947702b173309e9f8194bb85b74d86e28dfdea3 Mon Sep 17 00:00:00 2001
+From: Derek <derek@mac.mynetworksettings.com>
+Date: Fri, 26 Dec 2025 09:20:10 -0500
+Subject: [PATCH 3/3] db: relax FK enforcement during rebuild
+
+---
+ sqlitedb/sqlitedb.h | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/sqlitedb/sqlitedb.h b/sqlitedb/sqlitedb.h
+index 029cb81..61c4a61 100644
+--- a/sqlitedb/sqlitedb.h
++++ b/sqlitedb/sqlitedb.h
+@@ -287,6 +287,14 @@ inline bool SqliteDB::initFromFile()
+   if (!prepareSchemaVersionStatement()) [[unlikely]]
+     return false;
+ 
++  if (!d_readonly)
++  {
++    // Disable FK enforcement while building the DB from frames; some backups
++    // can insert rows out of order during reconstruction.
++    sqlite3_exec(d_db, "PRAGMA foreign_keys = OFF", nullptr, nullptr, nullptr);
++    sqlite3_exec(d_db, "PRAGMA defer_foreign_keys = ON", nullptr, nullptr, nullptr);
++  }
++
+   //sqlite3_set_authorizer(d_db, authorizer, &d_schema_changed);
+ 
+   return registerCustoms();
+-- 
+2.39.5 (Apple Git-154)
+

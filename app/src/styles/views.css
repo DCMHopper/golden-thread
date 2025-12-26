@@ -1,0 +1,449 @@
+/* Flatpickr overrides for compact calendar */
+.flatpickr-calendar {
+  font-size: var(--font-size-xs) !important;
+  width: 240px !important;
+  box-shadow: var(--shadow-md) !important;
+  border-radius: var(--radius-md) !important;
+  border: var(--border-width) solid var(--color-border) !important;
+  background: var(--color-bg-primary) !important;
+}
+
+.flatpickr-months {
+  padding: 6px 8px 4px !important;
+}
+
+.flatpickr-current-month {
+  font-size: 12px !important;
+  padding: 4px 0 0 0 !important;
+  height: 24px !important;
+  color: var(--color-text-primary) !important;
+}
+
+.flatpickr-monthDropdown-months {
+  font-size: 11px !important;
+  padding: 2px 4px !important;
+  color: var(--color-text-primary) !important;
+  background: var(--color-bg-primary) !important;
+}
+
+.numInputWrapper {
+  height: 20px !important;
+}
+
+.numInputWrapper input {
+  font-size: 11px !important;
+  padding: 0 4px !important;
+  color: var(--color-text-primary) !important;
+  background: transparent !important;
+}
+
+.flatpickr-prev-month,
+.flatpickr-next-month {
+  padding: 4px 8px !important;
+  height: 24px !important;
+}
+
+.flatpickr-prev-month svg,
+.flatpickr-next-month svg {
+  width: 10px !important;
+  height: 10px !important;
+  fill: var(--color-text-secondary) !important;
+}
+
+.flatpickr-weekdays {
+  height: 24px !important;
+  margin-top: 4px !important;
+}
+
+.flatpickr-weekday {
+  font-size: var(--font-size-xs) !important;
+  font-weight: var(--font-weight-medium) !important;
+  color: var(--color-text-tertiary) !important;
+}
+
+.flatpickr-days {
+  width: 240px !important;
+}
+
+.dayContainer {
+  width: 240px !important;
+  min-width: 240px !important;
+  max-width: 240px !important;
+}
+
+.flatpickr-day {
+  height: 28px !important;
+  line-height: 28px !important;
+  max-width: 34px !important;
+  font-size: var(--font-size-xs) !important;
+  border-radius: var(--radius-sm) !important;
+  color: var(--color-text-primary) !important;
+}
+
+.flatpickr-day.selected {
+  background: var(--color-primary) !important;
+  border-color: var(--color-primary) !important;
+  color: var(--color-white) !important;
+}
+
+.flatpickr-day.today {
+  border-color: var(--color-primary) !important;
+  color: var(--color-primary) !important;
+}
+
+.flatpickr-day:hover {
+  background: var(--color-hover-bg) !important;
+  border-color: transparent !important;
+}
+
+.flatpickr-monthDropdown-months option {
+  color: var(--color-text-primary) !important;
+  background: var(--color-bg-primary) !important;
+}
+
+.flatpickr-weekdaycontainer {
+  color: var(--color-text-tertiary) !important;
+}
+
+.flatpickr-weekwrapper .flatpickr-weekday {
+  color: var(--color-text-tertiary) !important;
+}
+
+.flatpickr-time input,
+.flatpickr-time .flatpickr-am-pm {
+  color: var(--color-text-primary) !important;
+  background: var(--color-bg-primary) !important;
+}
+
+/* Modal Base */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.75);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal.hidden {
+  display: none;
+}
+
+.modal-content {
+  background: var(--color-bg-primary);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  padding: var(--space-6);
+  max-width: 480px;
+  width: 100%;
+  max-height: 85vh;
+  box-shadow: var(--shadow-xl);
+}
+
+#tag-manager-modal .modal-content {
+  max-width: 620px;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.modal-close {
+  background: transparent;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: var(--color-text-tertiary);
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.modal-close:hover {
+  color: var(--color-text-primary);
+}
+
+.modal-body {
+  padding-top: var(--space-4);
+  overflow-y: auto;
+  max-height: calc(85vh - 100px);
+}
+
+/* Tag Manager */
+.tag-create {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--color-bg-tertiary);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+}
+
+.tag-color-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag-create input[type="text"] {
+  flex: 1;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.tag-create input[type="text"]:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+.tag-color-presets {
+  display: grid;
+  grid-template-columns: repeat(4, 16px);
+  gap: 6px;
+  justify-content: center;
+}
+
+.tag-color-preset {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border);
+  padding: 0;
+  cursor: pointer;
+}
+
+.tag-color-preset.active {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-light);
+}
+
+#create-tag-btn {
+  border: 1px solid var(--tag-create-color, var(--color-primary));
+  background: var(--tag-create-color, var(--color-primary));
+  transition: filter var(--transition-base), background-color var(--transition-base);
+}
+
+#create-tag-btn:hover {
+  background: var(--tag-create-color, var(--color-primary));
+  filter: brightness(0.92);
+}
+
+#create-tag-btn:focus-visible {
+  box-shadow: 0 0 0 3px var(--tag-create-focus, var(--color-primary-light));
+}
+
+.tag-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.tag-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.tag-item-color {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tag-item-name {
+  flex: 1;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+/* Scrapbook View */
+.scrapbook-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.scrapbook-tag-selector {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.scrapbook-tag-selector label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+#scrapbook-tag-select {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-sm);
+  min-width: 180px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+#scrapbook-tag-select:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+#scrapbook-message-list {
+  overflow-y: auto;
+  height: calc(100vh - 240px);
+}
+
+/* Discontinuity Indicator */
+.message-discontinuity {
+  text-align: center;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  padding: var(--space-2) 0;
+  letter-spacing: 0.2em;
+}
+
+/* Tag Dots on Messages */
+.message-tags {
+  display: flex;
+  gap: 4px;
+  margin-top: var(--space-2);
+  align-items: center;
+  position: relative;
+}
+
+.tag-dots {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.tag-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  cursor: help;
+  transition: transform var(--transition-fast);
+}
+
+.tag-dot:hover {
+  transform: scale(1.4);
+}
+
+/* Tag Trigger Icon */
+.message-tag-trigger {
+  opacity: 0;
+  margin-left: var(--space-2);
+  cursor: pointer;
+  font-size: 14px;
+  transition: opacity var(--transition-fast);
+  user-select: none;
+}
+
+.message:hover .message-tag-trigger {
+  opacity: 0.5;
+}
+
+.message-tag-trigger:hover {
+  opacity: 1 !important;
+}
+
+/* Tag Picker Popup */
+.tag-picker {
+  position: absolute;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-3);
+  z-index: 100;
+  min-width: 180px;
+  left: calc(100% + 8px);
+  top: 0;
+}
+
+.tag-picker.hidden {
+  display: none;
+}
+
+.tag-picker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+
+.tag-picker-item:hover {
+  background: var(--color-hover-bg);
+}
+
+.tag-picker-item.selected {
+  background: var(--color-primary-light);
+}
+
+.tag-picker-color {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tag-picker-checkmark {
+  color: var(--color-primary);
+  font-weight: bold;
+  font-size: 14px;
+  margin-left: auto;
+  visibility: hidden;
+}
+
+.tag-picker-checkmark.visible {
+  visibility: visible;
+}
+
+.scrapbook-message {
+  cursor: pointer;
+}
+
+.scrapbook-message-thread {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 4px;
+}
+
+.tag-color-1 { background: #c3684a; }
+.tag-color-2 { background: #d3a24b; }
+.tag-color-3 { background: #9b7a52; }
+.tag-color-4 { background: #5f8f6b; }
+.tag-color-5 { background: #5f88b3; }
+.tag-color-6 { background: #b36a78; }
+.tag-color-7 { background: #7a6bb0; }
+.tag-color-8 { background: #4f8f86; }
+.tag-color-default { background: var(--color-border-hover); }

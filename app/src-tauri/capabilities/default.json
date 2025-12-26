@@ -1,0 +1,14 @@
+{
+  "identifier": "default",
+  "description": "Default permissions for Golden Thread",
+  "local": true,
+  "windows": ["*"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen",
+    "dialog:default",
+    "dialog:allow-open",
+    "clipboard-manager:allow-write-text"
+  ]
+}

@@ -1,0 +1,377 @@
+From 46be32de02ec917b5f7fa716042511b4fe3a84a6 Mon Sep 17 00:00:00 2001
+From: Derek <derek@mac.mynetworksettings.com>
+Date: Fri, 26 Dec 2025 09:20:05 -0500
+Subject: [PATCH 2/3] api: add C bridge and export helpers
+
+---
+ backupframe/backupframe.h       |  12 ++
+ gt_bridge/gt_bridge.cc        | 204 ++++++++++++++++++++++++++++++++
+ gt_bridge/gt_bridge.h         |  24 ++++
+ logger/logger.h                 |  16 +++
+ signalbackup/exportdecrypted.cc |   6 +
+ signalbackup/savedbtofile.cc    |  20 ++++
+ signalbackup/signalbackup.h     |   2 +
+ 7 files changed, 284 insertions(+)
+ create mode 100644 gt_bridge/gt_bridge.cc
+ create mode 100644 gt_bridge/gt_bridge.h
+ create mode 100644 signalbackup/exportdecrypted.cc
+ create mode 100644 signalbackup/savedbtofile.cc
+
+diff --git a/backupframe/backupframe.h b/backupframe/backupframe.h
+index fa0fa5a..d24f08e 100644
+--- a/backupframe/backupframe.h
++++ b/backupframe/backupframe.h
+@@ -92,6 +92,8 @@ class BackupFrame
+   virtual FRAMETYPE frameType() const = 0;
+   inline std::string frameTypeString() const;
+   inline static BackupFrame *instantiate(FRAMETYPE, unsigned char *data, size_t length, uint64_t count = 0);
++  inline static std::size_t registrySize();
++  inline static bool registryHas(FRAMETYPE ft);
+   virtual void printInfo() const = 0;
+   inline uint64_t frameNumber() const;
+   inline virtual uint32_t attachmentSize() const;
+@@ -399,6 +401,16 @@ inline BackupFrame *BackupFrame::instantiate(FRAMETYPE ft, unsigned char *data,
+   return ret;
+ }
+ 
++inline std::size_t BackupFrame::registrySize() // static
++{
++  return s_registry().size();
++}
++
++inline bool BackupFrame::registryHas(FRAMETYPE ft) // static
++{
++  return s_registry().find(ft) != s_registry().end();
++}
++
+ // maybe check endianness?
+ inline constexpr uint32_t BackupFrame::bytesToUint32(unsigned char const *data, size_t len) const
+ {
+diff --git a/gt_bridge/gt_bridge.cc b/gt_bridge/gt_bridge.cc
+new file mode 100644
+index 0000000..7775402
+--- /dev/null
++++ b/gt_bridge/gt_bridge.cc
+@@ -0,0 +1,204 @@
++#include "gt_bridge.h"
++
++#include <exception>
++#include <string>
++#include <cstring>
++#include <fstream>
++#include <vector>
++
++#include "backupframe/backupframe.h"
++#include "headerframe/headerframe.h"
++#include "signalbackup/signalbackup.h"
++#include "logger/logger.h"
++#include "common_bytes.h"
++
++static void ldr_write_err(char *buf, size_t len, std::string const &msg)
++{
++  if (!buf || len == 0)
++    return;
++  size_t copy_len = msg.size();
++  if (copy_len >= len)
++    copy_len = len - 1;
++  std::memcpy(buf, msg.data(), copy_len);
++  buf[copy_len] = '\0';
++}
++
++static std::string ldr_tail_file(std::string const &path, std::size_t max_bytes)
++{
++  std::ifstream file(path, std::ios::binary);
++  if (!file.is_open())
++    return std::string();
++  file.seekg(0, std::ios::end);
++  std::streamoff size = file.tellg();
++  if (size <= 0)
++    return std::string();
++  std::streamoff start = size > static_cast<std::streamoff>(max_bytes)
++    ? size - static_cast<std::streamoff>(max_bytes)
++    : 0;
++  file.seekg(start, std::ios::beg);
++  std::string data;
++  data.resize(static_cast<std::size_t>(size - start));
++  file.read(&data[0], data.size());
++  return data;
++}
++
++static void ldr_probe_header(const char *backup_path)
++{
++  std::ifstream file(backup_path, std::ios::binary);
++  if (!file.is_open())
++  {
++    Logger::error("Probe: failed to open backup file");
++    return;
++  }
++
++  uint32_t raw_len = 0;
++  if (!file.read(reinterpret_cast<char *>(&raw_len), sizeof(raw_len)))
++  {
++    Logger::error("Probe: failed to read header length");
++    return;
++  }
++
++  uint32_t header_len = bepaald::swap_endian<uint32_t>(raw_len);
++  Logger::message("Probe: header length: ", header_len);
++  if (header_len < 2 || header_len > 10240)
++  {
++    Logger::error("Probe: invalid header length (", header_len, ")");
++    return;
++  }
++
++  std::vector<unsigned char> headerdata(header_len);
++  if (!file.read(reinterpret_cast<char *>(headerdata.data()), static_cast<std::streamsize>(header_len)))
++  {
++    Logger::error("Probe: failed to read header data");
++    return;
++  }
++
++  Logger::message("Probe: registry size: ", BackupFrame::registrySize(),
++                  ", has HEADER: ", BackupFrame::registryHas(BackupFrame::FRAMETYPE::HEADER));
++
++  int fieldnum = BackupFrame::getFieldnumber(headerdata[0]);
++  unsigned int wiretype = BackupFrame::wiretype(headerdata[0]);
++  unsigned int offset = 1;
++  int64_t datalength = BackupFrame::getLength(headerdata.data(), &offset, header_len);
++  Logger::message("Probe: wrapper field=", fieldnum, " wiretype=", wiretype,
++                  " datalength=", datalength, " offset=", offset);
++
++  BackupFrame *regframe = nullptr;
++  if (datalength > 0 && static_cast<uint64_t>(datalength) <= header_len - offset)
++  {
++    regframe = BackupFrame::instantiate(BackupFrame::FRAMETYPE::HEADER,
++                                        headerdata.data() + offset,
++                                        static_cast<size_t>(datalength),
++                                        0);
++  }
++  if (regframe)
++  {
++    Logger::message("Probe: registry instantiate ok: ", regframe->ok(),
++                    ", type: ", regframe->frameTypeString());
++    delete regframe;
++  }
++  else
++  {
++    Logger::error("Probe: registry instantiate failed");
++  }
++
++  HeaderFrame direct(
++    headerdata.data() + offset,
++    static_cast<size_t>(datalength > 0 ? datalength : 0),
++    0
++  );
++  Logger::message("Probe: direct header ok: ", direct.ok(),
++                  ", iv_len: ", direct.iv_length(),
++                  ", salt_len: ", direct.salt_length(),
++                  ", version: ", direct.version());
++}
++
++int gt_decode_backup(const char *backup_path,
++                      const char *passphrase,
++                      const char *out_db_path,
++                      const char *out_frames_dir,
++                      int overwrite,
++                      char *err_buf,
++                      size_t err_len)
++{
++  try
++  {
++    if (!backup_path || !passphrase || !out_db_path || !out_frames_dir)
++    {
++      ldr_write_err(err_buf, err_len, "invalid arguments");
++      return 2;
++    }
++
++    Logger::setTimestamp(false);
++    std::string log_path = std::string(out_frames_dir) + "/decode.log";
++    Logger::setFile(log_path);
++    {
++      std::ofstream logstream(log_path, std::ios::app);
++      if (logstream.is_open())
++      {
++        logstream << "Starting decode for: " << backup_path << "\n";
++      }
++    }
++    Logger::message("Starting decode for: ", backup_path);
++    ldr_probe_header(backup_path);
++
++    std::vector<long long int> editattachments;
++    SignalBackup backup(
++      backup_path,
++      passphrase,
++      false,  // verbose
++      false,  // truncate
++      false,  // showprogress
++      false,  // replaceattachments
++      false,  // assumebadframesizeonbadmac
++      editattachments,
++      true,   // stoponerror
++      true    // fulldecode
++    );
++
++    if (!backup.ok())
++    {
++      Logger::flush();
++      std::string tail = ldr_tail_file(log_path, 4096);
++      if (!tail.empty())
++        ldr_write_err(err_buf, err_len, tail);
++      else
++        ldr_write_err(err_buf, err_len, "failed to decode backup");
++      return 3;
++    }
++
++    if (!backup.saveDatabaseToFile(out_db_path, overwrite != 0))
++    {
++      Logger::flush();
++      std::string tail = ldr_tail_file(log_path, 4096);
++      if (!tail.empty())
++        ldr_write_err(err_buf, err_len, tail);
++      else
++        ldr_write_err(err_buf, err_len, "failed to write decrypted database");
++      return 4;
++    }
++
++    if (!backup.exportDecryptedToDir(out_frames_dir, overwrite != 0, false, false))
++    {
++      Logger::flush();
++      std::string tail = ldr_tail_file(log_path, 4096);
++      if (!tail.empty())
++        ldr_write_err(err_buf, err_len, tail);
++      else
++        ldr_write_err(err_buf, err_len, "failed to export frames/attachments");
++      return 5;
++    }
++
++    return 0;
++  }
++  catch (std::exception const &ex)
++  {
++    ldr_write_err(err_buf, err_len, ex.what());
++    return 100;
++  }
++  catch (...)
++  {
++    ldr_write_err(err_buf, err_len, "unknown error");
++    return 101;
++  }
++}
+diff --git a/gt_bridge/gt_bridge.h b/gt_bridge/gt_bridge.h
+new file mode 100644
+index 0000000..9dd9e18
+--- /dev/null
++++ b/gt_bridge/gt_bridge.h
+@@ -0,0 +1,24 @@
++#ifndef GT_BRIDGE_H_
++#define GT_BRIDGE_H_
++
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Returns 0 on success. Non-zero on failure.
++// err_buf may be null; err_len may be 0.
++int gt_decode_backup(const char *backup_path,
++                      const char *passphrase,
++                      const char *out_db_path,
++                      const char *out_frames_dir,
++                      int overwrite,
++                      char *err_buf,
++                      size_t err_len);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/logger/logger.h b/logger/logger.h
+index 47f47f1..341711c 100644
+--- a/logger/logger.h
++++ b/logger/logger.h
+@@ -130,6 +130,7 @@ class Logger
+   inline static void output_indent(int indent, First const &f, Rest const &... r);
+ 
+   inline static void warnOnce(std::string const &w, bool error = false, std::string::size_type = std::string::npos);
++  inline static void flush();
+ 
+   inline ~Logger();
+  private:
+@@ -266,6 +267,21 @@ inline void Logger::setTimestamp(bool val) // static
+   firstUse();
+ }
+ 
++inline void Logger::flush() // static
++{
++  //ensureLogger();
++  firstUse();
++  if (s_instance->d_strstreambackend && s_instance->d_strstreambackend->tellp() != 0)
++  {
++    if (s_instance->d_file)
++      (*s_instance->d_file) << s_instance->d_strstreambackend->str();
++    s_instance->d_strstreambackend->str("");
++    s_instance->d_strstreambackend->clear();
++  }
++  if (s_instance->d_file)
++    (*s_instance->d_file) << std::flush;
++}
++
+ template <typename First, typename... Rest>
+ inline void Logger::message_overwrite(First const &f, Rest const &... r) // static
+ {
+diff --git a/signalbackup/exportdecrypted.cc b/signalbackup/exportdecrypted.cc
+new file mode 100644
+index 0000000..ece2c9b
+--- /dev/null
++++ b/signalbackup/exportdecrypted.cc
+@@ -0,0 +1,6 @@
++#include "signalbackup.ih"
++
++bool SignalBackup::exportDecryptedToDir(std::string const &directory, bool overwrite, bool keepattachmentdatainmemory, bool onlydb)
++{
++  return exportBackupToDir(directory, overwrite, keepattachmentdatainmemory, onlydb);
++}
+diff --git a/signalbackup/savedbtofile.cc b/signalbackup/savedbtofile.cc
+new file mode 100644
+index 0000000..77e7fb8
+--- /dev/null
++++ b/signalbackup/savedbtofile.cc
+@@ -0,0 +1,20 @@
++#include "signalbackup.ih"
++
++#include "../common_filesystem.h"
++
++bool SignalBackup::saveDatabaseToFile(std::string const &path, bool overwrite) const
++{
++  if (path.empty())
++  {
++    Logger::error("No database output path specified");
++    return false;
++  }
++
++  if (!overwrite && bepaald::fileOrDirExists(path))
++  {
++    Logger::error("Output db already exists: ", path);
++    return false;
++  }
++
++  return d_database.saveToFile(path);
++}
+diff --git a/signalbackup/signalbackup.h b/signalbackup/signalbackup.h
+index 3164f89..f990102 100644
+--- a/signalbackup/signalbackup.h
++++ b/signalbackup/signalbackup.h
+@@ -247,6 +247,8 @@ class SignalBackup
+                                   bool overwrite, bool keepattachmentdatainmemory, bool onlydb = false);
+   bool exportXml(std::string const &filename, bool overwrite, std::string self, bool includemms = false, bool keepattachmentdatainmemory = true);
+   bool exportCsv(std::string const &filename, std::string const &table, bool overwrite) const;
++  bool saveDatabaseToFile(std::string const &path, bool overwrite) const;
++  bool exportDecryptedToDir(std::string const &directory, bool overwrite, bool keepattachmentdatainmemory, bool onlydb);
+   void listThreads() const;
+   void listRecipients() const;
+   void cropToThread(long long int threadid);
+-- 
+2.39.5 (Apple Git-154)
+

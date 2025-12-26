@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Golden Thread</title>
+    <script>
+      // Set theme and accent immediately to prevent flash
+      (function() {
+        const savedTheme = localStorage.getItem("gt_dark_mode");
+        const isDark = savedTheme === "true";
+        document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
+
+        const savedAccent = localStorage.getItem("gt_accent_color") || "amber";
+        document.documentElement.setAttribute("data-accent", savedAccent);
+      })();
+    </script>
+    <style>
+      /* Splash screen dark mode support - must be inline to prevent flash */
+      :root[data-theme="dark"] #splash-screen {
+        background: #1a1614 !important;
+      }
+      :root[data-theme="dark"] #splash-screen svg {
+        color: #f5a94d !important;
+      }
+      :root[data-theme="dark"] #splash-screen h1 {
+        color: #ebe8e2 !important;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Splash Screen - Inline styles for immediate display -->
+    <div id="splash-screen" style="
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #fffcf7;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      z-index: 9999;
+      transition: opacity 300ms ease-out;
+    ">
+      <svg viewBox="0 0 100 100" width="64" height="64" xmlns="http://www.w3.org/2000/svg" style="color: #ea9a3e;">
+        <path d="M 20 50 C 20 35 30 30 40 40 C 50 50 50 50 60 40 C 70 30 80 35 80 50 C 80 65 70 70 60 60 C 50 50 50 50 40 60 C 30 70 20 65 20 50"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="4"
+              stroke-linecap="round"
+              stroke-linejoin="round"/>
+      </svg>
+      <h1 style="
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        margin: 0;
+        color: #1a1614;
+      ">Golden Thread</h1>
+    </div>
+
+    <div id="app">
+      <header>
+        <div class="header-left">
+          <div class="logo-title">
+            <svg class="app-logo" viewBox="0 0 100 100" width="28" height="28" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M 20 50 C 20 35 30 30 40 40 C 50 50 50 50 60 40 C 70 30 80 35 80 50 C 80 65 70 70 60 60 C 50 50 50 50 40 60 C 30 70 20 65 20 50"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="4"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"/>
+            </svg>
+            <h1>Golden Thread</h1>
+          </div>
+          <div class="search">
+            <div class="search-field">
+              <input id="search-input" type="search" placeholder="Search messages" />
+              <div class="search-controls hidden" id="search-controls-wrapper">
+                <span id="search-counter" class="search-counter">0/0</span>
+                <button id="search-prev" class="search-nav-btn" type="button" aria-label="Previous match">↑</button>
+                <button id="search-next" class="search-nav-btn" type="button" aria-label="Next match">↓</button>
+              </div>
+            </div>
+            <button id="search-all" class="link-button hidden" type="button">All results</button>
+            <div class="jump-wrap">
+              <button id="jump-toggle" class="secondary" type="button">Jump</button>
+              <div id="jump-controls" class="jump-controls hidden">
+                <input id="jump-date" type="text" placeholder="Pick a date" readonly />
+                <button id="jump-btn" class="secondary">Go</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="header-center">
+          <div class="tabs">
+            <button id="tab-messages" class="tab active">Messages</button>
+            <button id="tab-gallery" class="tab">Gallery</button>
+            <button id="tab-scrapbook" class="tab">Scrapbook</button>
+          </div>
+        </div>
+        <div class="actions">
+          <div class="options">
+            <button id="options-btn" class="secondary">Options</button>
+            <div id="options-menu" class="options-menu hidden">
+              <div class="option-row">
+                <span class="option-label">Require click to show media</span>
+                <button id="media-toggle" role="switch" aria-checked="true" class="toggle-switch" type="button">
+                  <span class="toggle-track">
+                    <span class="toggle-thumb"></span>
+                  </span>
+                </button>
+              </div>
+              <div class="option-row">
+                <span class="option-label">Dark mode</span>
+                <button id="dark-mode-toggle" role="switch" aria-checked="false" class="toggle-switch" type="button">
+                  <span class="toggle-track">
+                    <span class="toggle-thumb"></span>
+                  </span>
+                </button>
+              </div>
+              <div class="option-row">
+                <span class="option-label">Theme color</span>
+                <div class="color-swatch-group" role="radiogroup" aria-label="Theme color">
+                  <button class="color-swatch active" data-color="amber" role="radio" aria-checked="true" aria-label="Glowing Amber" type="button">
+                    <span class="swatch-color swatch-amber"></span>
+                  </button>
+                  <button class="color-swatch" data-color="blue" role="radio" aria-checked="false" aria-label="Soft Blue" type="button">
+                    <span class="swatch-color swatch-blue"></span>
+                  </button>
+                  <button class="color-swatch" data-color="purple" role="radio" aria-checked="false" aria-label="Heather Purple" type="button">
+                    <span class="swatch-color swatch-purple"></span>
+                  </button>
+                  <button class="color-swatch" data-color="green" role="radio" aria-checked="false" aria-label="Sage Green" type="button">
+                    <span class="swatch-color swatch-green"></span>
+                  </button>
+                </div>
+              </div>
+              <div class="option-divider"></div>
+              <button id="copy-diag-btn" class="secondary">Copy diagnostics</button>
+              <button id="import-btn" class="secondary">Import backup</button>
+              <button id="seed-btn" class="secondary">Load demo data</button>
+              <button id="reset-btn" class="secondary" data-confirm-state="initial">Reset archive</button>
+            </div>
+          </div>
+        </div>
+      </header>
+      <section id="import-panel" class="import-panel hidden">
+        <div class="import-panel-header">
+          <h3>Import Backup</h3>
+          <button id="close-import-panel" class="icon-close" type="button" aria-label="Close import panel">×</button>
+        </div>
+        <div class="import-row">
+          <span class="label">Backup file</span>
+          <span id="import-file" class="value">None selected</span>
+          <button id="choose-file-btn" class="secondary">Choose file</button>
+        </div>
+        <div class="import-row">
+          <label class="label" for="passphrase-input">Passphrase</label>
+          <div class="passphrase-wrap">
+            <input id="passphrase-input" type="password" placeholder="30-digit passphrase" />
+            <span id="passphrase-count" class="count">0/30</span>
+          </div>
+          <button id="run-import-btn">Start import</button>
+        </div>
+        <p class="hint">Passphrase is never stored. Only Android .backup files are supported.</p>
+      </section>
+      <main>
+        <section class="panel">
+          <h2>Threads</h2>
+          <div class="thread-controls">
+            <input id="thread-search" type="search" placeholder="Search threads" />
+          </div>
+          <ul id="thread-list" class="list"></ul>
+        </section>
+        <section class="panel">
+          <div id="messages-view">
+            <div id="message-list" class="messages"></div>
+          </div>
+          <div id="search-view" class="hidden">
+            <div id="search-results" class="search-results"></div>
+          </div>
+          <div id="gallery-view" class="hidden">
+            <div class="gallery-filters">
+              <label>
+                From
+                <input id="gallery-from" type="text" placeholder="Date" readonly />
+                <button id="gallery-from-clear" class="filter-clear" type="button">×</button>
+              </label>
+              <label>
+                To
+                <input id="gallery-to" type="text" placeholder="Date" readonly />
+                <button id="gallery-to-clear" class="filter-clear" type="button">×</button>
+              </label>
+              <label>
+                Size
+                <select id="gallery-size">
+                  <option value="all">All</option>
+                  <option value="small">Small (&lt; 1MB)</option>
+                  <option value="medium">Medium (1-10MB)</option>
+                  <option value="large">Large (&gt; 10MB)</option>
+                </select>
+              </label>
+              <label>
+                Sort
+                <select id="gallery-sort">
+                  <option value="date_desc">Newest</option>
+                  <option value="date_asc">Oldest</option>
+                  <option value="size_desc">Largest</option>
+                  <option value="size_asc">Smallest</option>
+                </select>
+              </label>
+            </div>
+            <div id="gallery-grid" class="gallery-grid"></div>
+          </div>
+          <div id="scrapbook-view" class="hidden">
+            <div class="scrapbook-header">
+              <div class="scrapbook-tag-selector">
+                <label>Viewing tag:</label>
+                <select id="scrapbook-tag-select">
+                  <option value="">Select a tag...</option>
+                </select>
+              </div>
+              <button id="manage-tags-btn" class="secondary">Manage tags</button>
+            </div>
+            <div id="scrapbook-message-list" class="messages"></div>
+          </div>
+        </section>
+      </main>
+      <footer>
+        <span id="status">Ready.</span>
+      </footer>
+    </div>
+    <div id="tag-manager-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Manage Tags</h3>
+          <button id="close-tag-manager" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="tag-create">
+            <input id="new-tag-name" type="text" placeholder="Tag name" maxlength="20" />
+            <div class="tag-color-picker">
+              <div id="tag-color-presets" class="tag-color-presets" aria-label="Tag color presets"></div>
+            </div>
+            <button id="create-tag-btn" class="primary">Create</button>
+          </div>
+          <div id="tag-list" class="tag-list"></div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
