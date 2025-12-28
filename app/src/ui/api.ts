@@ -81,6 +81,14 @@ export function attachmentThumbnail(sha256: string, mime: string | null, maxSize
   return invoke<string>("attachment_thumbnail_cmd", { sha256, mime, maxSize });
 }
 
+export function clearMediaCache() {
+  return invoke<void>("clear_media_cache_cmd");
+}
+
+export function drainMediaEvictions() {
+  return invoke<string[]>("drain_media_evictions_cmd");
+}
+
 export function listTags() {
   return invoke<Tag[]>("list_tags_cmd");
 }

@@ -38,6 +38,8 @@ import {
   listTags as apiListTags,
   listThreadMedia as apiListThreadMedia,
   listThreads as apiListThreads,
+  clearMediaCache as apiClearMediaCache,
+  drainMediaEvictions as apiDrainMediaEvictions,
   resetArchive as apiResetArchive,
   searchMessages as apiSearchMessages,
   seedDemo as apiSeedDemo,
@@ -49,11 +51,11 @@ import {
   ATTACHMENT_DATA_URL_CACHE_MAX,
   ATTACHMENT_FILE_URL_CACHE_MAX,
   ATTACHMENT_LIST_CACHE_MAX,
-  ATTACHMENT_THUMB_CACHE_MAX,
+  ATTACHMENT_THUMB_CACHE_MAX_BYTES,
   GALLERY_PAGE,
   PAGE_SIZE,
 } from "./ui/constants";
-import { LruCache } from "./ui/cache";
+import { LruCache, WeightedLruCache } from "./ui/cache";
 import {
   createMediaPlaceholder,
   debounce,
@@ -140,7 +142,10 @@ let isSearchJumping = false;
 const attachmentCache = new LruCache<string, AttachmentRow[]>(ATTACHMENT_LIST_CACHE_MAX);
 const attachmentDataCache = new LruCache<string, string>(ATTACHMENT_DATA_URL_CACHE_MAX);
 const attachmentFileCache = new LruCache<string, string>(ATTACHMENT_FILE_URL_CACHE_MAX);
-const attachmentThumbCache = new LruCache<string, string>(ATTACHMENT_THUMB_CACHE_MAX);
+const attachmentThumbCache = new WeightedLruCache<string, string>(
+  ATTACHMENT_THUMB_CACHE_MAX_BYTES,
+  (value) => value.length,
+);
 let requireMediaClick = true;
 let messageStore: MessageRow[] = [];
 let threadStore: ThreadSummary[] = [];
@@ -152,10 +157,22 @@ let isLightboxFullscreen = false;
 const messageAttachmentsCache = new Map<string, MediaAsset[]>();
 const threadMediaCache = new Map<string, MediaAsset[]>();
 let galleryItems: ThreadMediaRow[] = [];
+const galleryItemsById = new Map<string, ThreadMediaRow>();
+let galleryThumbObserver: IntersectionObserver | null = null;
+const galleryThumbQueue = new Map<HTMLImageElement, MediaAsset>();
+let galleryThumbInFlight = 0;
+const galleryThumbTasks: Array<() => void> = [];
+const galleryThumbPending = new Set<string>();
+let galleryEvictionTimer: number | null = null;
 let galleryOffset = 0;
 let galleryLoading = false;
 let galleryHasMore = true;
 const galleryFilterReload = debounce(() => loadGallery(true), 200);
+const THUMB_CONCURRENCY = 4;
+const LARGE_MEDIA_BYTES = 10 * 1024 * 1024;
+let currentPane: "messages" | "search" | "gallery" | "scrapbook" = "messages";
+let thumbInFlight = 0;
+const thumbQueue: Array<() => void> = [];
 const threadFilterReload = debounce(() => applyThreadFilters(), 200);
 const searchDebounced = debounce(() => runSearch(), 250);
 let tagsStore: Tag[] = [];
@@ -201,6 +218,48 @@ if (isTauri) {
   }).catch(() => {});
 }
 
+function runThumbTask<T>(task: () => Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      thumbInFlight += 1;
+      task()
+        .then(resolve)
+        .catch(reject)
+        .finally(() => {
+          thumbInFlight = Math.max(0, thumbInFlight - 1);
+          const next = thumbQueue.shift();
+          if (next) next();
+        });
+    };
+    if (thumbInFlight < THUMB_CONCURRENCY) {
+      run();
+    } else {
+      thumbQueue.push(run);
+    }
+  });
+}
+
+function runGalleryThumbTask(key: string, task: () => Promise<void>) {
+  if (galleryThumbPending.has(key)) return;
+  galleryThumbPending.add(key);
+  const run = () => {
+    galleryThumbInFlight += 1;
+    task()
+      .catch(() => {})
+      .finally(() => {
+        galleryThumbInFlight = Math.max(0, galleryThumbInFlight - 1);
+        const next = galleryThumbTasks.shift();
+        if (next) next();
+      });
+  };
+  if (galleryThumbInFlight < THUMB_CONCURRENCY) {
+    run();
+  } else {
+    // LIFO bias to prioritize most-recently-viewed items.
+    galleryThumbTasks.unshift(run);
+  }
+}
+
 if (mediaToggle) {
   const stored = localStorage.getItem("gt_media_click");
   requireMediaClick = stored ? stored === "true" : true;
@@ -240,9 +299,16 @@ function resetGalleryState() {
   galleryHasMore = true;
   galleryLoading = false;
   galleryItems = [];
+  galleryItemsById.clear();
   if (galleryGrid) {
     galleryGrid.replaceChildren();
   }
+  galleryThumbObserver?.disconnect();
+  galleryThumbObserver = null;
+  galleryThumbQueue.clear();
+  galleryThumbTasks.length = 0;
+  galleryThumbPending.clear();
+  stopGalleryEvictionMonitor();
 }
 
 function resetThreadState(threadId: string) {
@@ -280,6 +346,47 @@ function resetArchiveState() {
   resetGalleryState();
   if (messageList) messageList.replaceChildren();
   if (searchResults) searchResults.classList.add("hidden");
+}
+
+function startGalleryEvictionMonitor() {
+  if (!isTauri) return;
+  if (galleryEvictionTimer !== null) return;
+  galleryEvictionTimer = window.setInterval(() => {
+    if (currentPane !== "gallery") return;
+    void apiDrainMediaEvictions()
+      .then((sha256s) => {
+        if (!sha256s.length || !galleryGrid) return;
+        sha256s.forEach((sha) => {
+          // Clear frontend caches for evicted media
+          attachmentFileCache.delete(sha);
+          attachmentDataCache.delete(sha);
+          // Clear all thumbnail cache entries for this sha256
+          const thumbKeysToDelete: string[] = [];
+          attachmentThumbCache.forEach((_, key) => {
+            if (key.startsWith(`${sha}:`)) {
+              thumbKeysToDelete.push(key);
+            }
+          });
+          thumbKeysToDelete.forEach((key) => attachmentThumbCache.delete(key));
+          // Restore gallery placeholders
+          const cards = galleryGrid.querySelectorAll<HTMLDivElement>(`.gallery-item[data-sha256="${sha}"]`);
+          cards.forEach((card) => {
+            const id = card.dataset.itemId;
+            if (!id) return;
+            const item = galleryItemsById.get(id);
+            if (!item) return;
+            restoreGalleryPlaceholder(card, item);
+          });
+        });
+      })
+      .catch(() => {});
+  }, 1500);
+}
+
+function stopGalleryEvictionMonitor() {
+  if (galleryEvictionTimer === null) return;
+  window.clearInterval(galleryEvictionTimer);
+  galleryEvictionTimer = null;
 }
 
 async function refreshThreads() {
@@ -955,6 +1062,8 @@ messageList?.addEventListener("click", (event) => {
 
 function setContentPane(mode: "messages" | "search" | "gallery" | "scrapbook") {
   if (!messagesView || !searchView || !galleryView || !scrapbookView || !tabMessages || !tabGallery || !tabScrapbook) return;
+  const previous = currentPane;
+  currentPane = mode;
   messagesView.classList.toggle("hidden", mode !== "messages");
   searchView.classList.toggle("hidden", mode !== "search");
   galleryView.classList.toggle("hidden", mode !== "gallery");
@@ -962,6 +1071,15 @@ function setContentPane(mode: "messages" | "search" | "gallery" | "scrapbook") {
   tabMessages.classList.toggle("active", mode === "messages" || mode === "search");
   tabGallery.classList.toggle("active", mode === "gallery");
   tabScrapbook.classList.toggle("active", mode === "scrapbook");
+  if (previous === "gallery" && mode !== "gallery") {
+    cleanupGalleryMedia();
+    if (isTauri) {
+      void apiClearMediaCache();
+    }
+  }
+  if (mode === "gallery") {
+    startGalleryEvictionMonitor();
+  }
 }
 
 function clearSearchState() {
@@ -1020,6 +1138,7 @@ async function loadGallery(reset: boolean) {
     }
     galleryOffset += items.length;
     galleryItems = galleryItems.concat(items);
+    items.forEach((item) => galleryItemsById.set(item.id, item));
     renderGalleryItems(items);
   } finally {
     galleryLoading = false;
@@ -1032,13 +1151,15 @@ function renderGalleryItems(items: ThreadMediaRow[]) {
   items.forEach((item) => {
     const card = document.createElement("div");
     card.className = "gallery-item";
+    card.dataset.itemId = item.id;
+    card.dataset.sha256 = item.sha256;
     const meta = document.createElement("div");
     meta.className = "meta";
     const ts = mediaSortTs(item);
     const tsLabel = ts ? new Date(ts).toLocaleString() : "";
     meta.textContent = `${item.original_filename ?? item.mime ?? "Media"}${tsLabel ? ` · ${tsLabel}` : ""}`;
     const sizeBytes = item.size_bytes ?? 0;
-    const forceClick = item.kind === "video" || item.kind === "audio" || sizeBytes >= 8 * 1024 * 1024;
+    const forceClick = item.kind === "video" || item.kind === "audio" || sizeBytes >= LARGE_MEDIA_BYTES;
     if (requireMediaClick || forceClick) {
       insertGalleryPlaceholder(card, item, meta, forceClick);
     } else {
@@ -1059,8 +1180,9 @@ function insertGalleryPlaceholder(
   const label = requireMediaClick ? "Media hidden" : "Large media — click to load";
   const placeholder = createMediaPlaceholder("gallery", label);
   attachPlaceholderClick(placeholder, () => {
-    placeholder.remove();
-    renderGalleryMedia(card, item);
+    const loading = createMediaPlaceholder("gallery", "LOADING...");
+    placeholder.replaceWith(loading);
+    renderGalleryMedia(card, item, loading);
     if (requireMediaClick) {
       addHideMediaButton(card, () => {
         card.querySelectorAll("img, video, audio").forEach((el) => el.remove());
@@ -1074,6 +1196,36 @@ function insertGalleryPlaceholder(
   } else {
     card.appendChild(placeholder);
   }
+}
+
+function restoreGalleryPlaceholder(card: HTMLDivElement, item: ThreadMediaRow) {
+  const meta = card.querySelector(".meta") as HTMLDivElement | null;
+  if (!meta) return;
+  const sizeBytes = item.size_bytes ?? 0;
+  const forceClick = item.kind === "video" || item.kind === "audio" || sizeBytes >= LARGE_MEDIA_BYTES;
+  card.querySelectorAll("img, video, audio").forEach((el) => el.remove());
+  card.querySelectorAll(".media-placeholder").forEach((el) => el.remove());
+  card.querySelectorAll(".media-hide-btn").forEach((el) => el.remove());
+  insertGalleryPlaceholder(card, item, meta, forceClick);
+}
+
+function attachMediaFailureHandlers(
+  element: HTMLMediaElement,
+  onFailure: () => void,
+) {
+  const handler = () => {
+    if (element.dataset.mediaReady !== "1") return;
+    onFailure();
+  };
+  element.addEventListener("error", handler, { once: true });
+  element.addEventListener("stalled", handler, { once: true });
+  element.addEventListener("abort", handler, { once: true });
+  setTimeout(() => {
+    if (element.dataset.mediaReady !== "1") return;
+    if (element.networkState === element.NETWORK_NO_SOURCE || element.error) {
+      onFailure();
+    }
+  }, 15000);
 }
 
 function toMediaAssetFromAttachment(attachment: AttachmentRow): MediaAsset {
@@ -1104,19 +1256,33 @@ function toMediaAssetFromThreadMedia(item: ThreadMediaRow): MediaAsset {
   };
 }
 
-function renderGalleryMedia(card: HTMLDivElement, item: ThreadMediaRow) {
+function renderGalleryMedia(card: HTMLDivElement, item: ThreadMediaRow, loading?: HTMLElement) {
   if (!item.kind || !item.mime) return;
   const asset = toMediaAssetFromThreadMedia(item);
   if (item.kind === "image") {
     const img = document.createElement("img");
     img.alt = item.original_filename ?? "image";
+    img.decoding = "async";
+    img.loading = "lazy";
+    img.classList.add("media-thumb", "pending");
+    img.dataset.itemId = item.id;
+    if (!loading) {
+      loading = createMediaPlaceholder("gallery", "LOADING...");
+      card.prepend(loading);
+    }
     card.prepend(img);
     img.addEventListener("click", () => {
       lightboxGallery = galleryItems.map(toMediaAssetFromThreadMedia);
       lightboxIndex = lightboxGallery.findIndex((entry) => entry.id === item.id);
       openLightbox(asset);
     });
-    void applyThumbnailSource(img, asset);
+    img.addEventListener("load", () => {
+      loading?.remove();
+    });
+    img.addEventListener("error", () => {
+      if (loading) loading.textContent = "Media preview unavailable";
+    });
+    queueGalleryThumbLoad(img, asset, loading);
     return;
   }
   if (item.kind === "video") {
@@ -1138,6 +1304,10 @@ function renderGalleryMedia(card: HTMLDivElement, item: ThreadMediaRow) {
       }
     });
     card.prepend(video);
+    if (loading) {
+      video.addEventListener("loadeddata", () => loading?.remove(), { once: true });
+      video.addEventListener("canplay", () => loading?.remove(), { once: true });
+    }
     video.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1151,19 +1321,27 @@ function renderGalleryMedia(card: HTMLDivElement, item: ThreadMediaRow) {
       lightboxIndex = lightboxGallery.findIndex((entry) => entry.id === item.id);
       openLightbox(asset);
     });
-    void applyMediaSource(video, asset);
+    const restore = () => restoreGalleryPlaceholder(card, item);
+    attachMediaFailureHandlers(video, restore);
+    void applyMediaSource(video, asset, restore);
     return;
   }
   if (item.kind === "audio") {
     const audio = document.createElement("audio");
     audio.controls = true;
     card.prepend(audio);
+    if (loading) {
+      audio.addEventListener("loadeddata", () => loading?.remove(), { once: true });
+      audio.addEventListener("canplay", () => loading?.remove(), { once: true });
+    }
     audio.addEventListener("click", () => {
       lightboxGallery = galleryItems.map(toMediaAssetFromThreadMedia);
       lightboxIndex = lightboxGallery.findIndex((entry) => entry.id === item.id);
       openLightbox(asset);
     });
-    void applyMediaSource(audio, asset);
+    const restore = () => restoreGalleryPlaceholder(card, item);
+    attachMediaFailureHandlers(audio, restore);
+    void applyMediaSource(audio, asset, restore);
   }
 }
 
@@ -1262,7 +1440,7 @@ async function loadAttachmentThumbUrl(attachment: MediaAsset, maxSize: number): 
   }
   try {
     const path: string = await attachmentThumbnail(attachment.sha256, attachment.mime ?? null, maxSize);
-    const src = convertFileSrc(path);
+    const src = path.startsWith("data:") ? path : convertFileSrc(path);
     attachmentThumbCache.set(key, src);
     return src;
   } catch {
@@ -1276,7 +1454,7 @@ async function loadAttachmentSrcInfo(attachment: MediaAsset): Promise<SourceInfo
     return src ? { src, via: "file" } : null;
   }
   const size = attachment.size_bytes ?? 0;
-  if (size > 8 * 1024 * 1024) {
+  if (size > LARGE_MEDIA_BYTES) {
     const src = await loadAttachmentFileUrl(attachment);
     return src ? { src, via: "file" } : null;
   }
@@ -1288,21 +1466,86 @@ async function loadAttachmentSrcInfo(attachment: MediaAsset): Promise<SourceInfo
   return fallback ? { src: fallback, via: "file" } : null;
 }
 
-async function applyThumbnailSource(img: HTMLImageElement, attachment: MediaAsset) {
+async function applyThumbnailSource(img: HTMLImageElement, attachment: MediaAsset, onFailure?: () => void) {
   const thumb = await loadAttachmentThumbUrl(attachment, 320);
   if (thumb) {
+    img.classList.remove("pending");
     img.src = thumb;
     return;
   }
-  await applyMediaSource(img, attachment);
+  img.classList.remove("pending");
+  await applyMediaSource(img, attachment, onFailure);
+}
+
+function ensureGalleryThumbObserver() {
+  if (!galleryGrid || galleryThumbObserver) return;
+  if (!("IntersectionObserver" in window)) return;
+  galleryThumbObserver = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const img = entry.target as HTMLImageElement;
+        galleryThumbObserver?.unobserve(img);
+        const asset = galleryThumbQueue.get(img);
+        if (!asset) return;
+        galleryThumbQueue.delete(img);
+        const key = `${asset.sha256}:320:${img.dataset.itemId ?? ""}`;
+        runGalleryThumbTask(key, async () => {
+          try {
+            if (!isGalleryThumbInRange(img)) {
+              if (img.isConnected) {
+                galleryThumbQueue.set(img, asset);
+                galleryThumbObserver?.observe(img);
+              }
+              return;
+            }
+            await applyThumbnailSource(img, asset);
+            if (!img.src) {
+              const placeholder = img.parentElement?.querySelector(".media-placeholder") as HTMLElement | null;
+              if (placeholder) placeholder.textContent = "Media preview unavailable";
+            }
+          } finally {
+            galleryThumbPending.delete(key);
+          }
+        });
+      });
+    },
+    { root: galleryGrid, rootMargin: "200px" },
+  );
+}
+
+function queueGalleryThumbLoad(img: HTMLImageElement, asset: MediaAsset, loading?: HTMLElement) {
+  if (!galleryGrid || !("IntersectionObserver" in window)) {
+    void applyThumbnailSource(img, asset).then(() => {
+      if (!img.src && loading) loading.textContent = "Media preview unavailable";
+    });
+    return;
+  }
+  ensureGalleryThumbObserver();
+  galleryThumbQueue.set(img, asset);
+  galleryThumbObserver?.observe(img);
+}
+
+function isGalleryThumbInRange(img: HTMLImageElement): boolean {
+  if (!galleryGrid) return false;
+  if (!img.isConnected) return false;
+  const gridRect = galleryGrid.getBoundingClientRect();
+  const rect = img.getBoundingClientRect();
+  const margin = 200;
+  return rect.bottom >= gridRect.top - margin && rect.top <= gridRect.bottom + margin;
 }
 
 async function applyMediaSource(
   element: HTMLImageElement | HTMLVideoElement | HTMLAudioElement,
   attachment: MediaAsset,
+  onFailure?: () => void,
 ) {
   const info = await loadAttachmentSrcInfo(attachment);
   if (!info) {
+    if (onFailure) {
+      onFailure();
+      return;
+    }
     element.replaceWith(document.createTextNode("Media preview unavailable"));
     return;
   }
@@ -1314,11 +1557,36 @@ async function applyMediaSource(
     if (fallback && fallback !== info.src) {
       setMediaSource(element, fallback, mime);
     } else {
+      if (onFailure) {
+        onFailure();
+        return;
+      }
       element.replaceWith(document.createTextNode("Media preview unavailable"));
     }
   };
   element.addEventListener("error", onError, { once: true });
   setMediaSource(element, info.src, mime);
+  element.dataset.mediaReady = "1";
+}
+
+function cleanupGalleryMedia() {
+  if (!galleryGrid) return;
+  const cards = Array.from(galleryGrid.querySelectorAll<HTMLDivElement>(".gallery-item"));
+  cards.forEach((card) => {
+    const id = card.dataset.itemId;
+    if (!id) return;
+    const item = galleryItemsById.get(id);
+    if (!item) return;
+    if (item.kind === "video" || item.kind === "audio") {
+      restoreGalleryPlaceholder(card, item);
+    }
+  });
+  galleryThumbObserver?.disconnect();
+  galleryThumbObserver = null;
+  galleryThumbQueue.clear();
+  galleryThumbTasks.length = 0;
+  galleryThumbPending.clear();
+  stopGalleryEvictionMonitor();
 }
 
 let lightboxEl: HTMLDivElement | null = null;
@@ -1444,6 +1712,26 @@ async function toggleLightboxFullscreen() {
   }
 }
 
+function updateGalleryCardAfterLightboxDecrypt(attachment: MediaAsset) {
+  // Find gallery card for this attachment and update it if showing placeholder
+  if (!galleryGrid) return;
+  const cards = galleryGrid.querySelectorAll<HTMLDivElement>(`.gallery-item[data-sha256="${attachment.sha256}"]`);
+  cards.forEach((card) => {
+    const hasPlaceholder = card.querySelector(".media-placeholder") !== null;
+    const hasMedia = card.querySelector("img, video, audio") !== null;
+    // Only update if card is showing placeholder (large media click-to-load)
+    if (hasPlaceholder && !hasMedia) {
+      const id = card.dataset.itemId;
+      if (!id) return;
+      const item = galleryItemsById.get(id);
+      if (!item) return;
+      // Remove placeholder and render media
+      card.querySelectorAll(".media-placeholder").forEach((el) => el.remove());
+      renderGalleryMedia(card, item);
+    }
+  });
+}
+
 function openLightbox(attachment: MediaAsset) {
   ensureLightbox();
   if (!lightboxEl || !lightboxContent) return;
@@ -1456,18 +1744,24 @@ function openLightbox(attachment: MediaAsset) {
     const img = document.createElement("img");
     img.alt = attachment.original_filename ?? "image";
     lightboxContent.appendChild(img);
-    void applyMediaSource(img, attachment);
+    void applyMediaSource(img, attachment).then(() => {
+      updateGalleryCardAfterLightboxDecrypt(attachment);
+    });
   } else if (attachment.kind === "video") {
     const video = document.createElement("video");
     video.controls = true;
     video.preload = "metadata";
     lightboxContent.appendChild(video);
-    void applyMediaSource(video, attachment);
+    void applyMediaSource(video, attachment).then(() => {
+      updateGalleryCardAfterLightboxDecrypt(attachment);
+    });
   } else if (attachment.kind === "audio") {
     const audio = document.createElement("audio");
     audio.controls = true;
     lightboxContent.appendChild(audio);
-    void applyMediaSource(audio, attachment);
+    void applyMediaSource(audio, attachment).then(() => {
+      updateGalleryCardAfterLightboxDecrypt(attachment);
+    });
   }
   lightboxEl.classList.remove("hidden");
 }
@@ -1502,7 +1796,7 @@ function renderAttachments(container: HTMLElement, attachments: AttachmentRow[],
       meta.className = "meta";
       meta.textContent = att.original_filename ?? att.mime ?? "image";
       item.appendChild(meta);
-      void applyThumbnailSource(img, att);
+      void runThumbTask(() => applyThumbnailSource(img, att));
     } else if (att.kind === "video" && att.mime) {
       const video = document.createElement("video");
       video.controls = true;
@@ -1846,7 +2140,7 @@ galleryToClear?.addEventListener("click", () => {
 
 const onGalleryScroll = throttleRaf(() => {
   if (!galleryGrid || galleryLoading || !galleryHasMore) return;
-  if (galleryGrid.scrollTop + galleryGrid.clientHeight >= galleryGrid.scrollHeight - 80) {
+  if (galleryGrid.scrollTop + galleryGrid.clientHeight * 2 >= galleryGrid.scrollHeight) {
     void loadGallery(false);
   }
 });

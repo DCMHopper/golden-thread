@@ -75,8 +75,21 @@ export function setMediaSource(
 
 export function createMediaPlaceholder(context: "gallery" | "message", label: string) {
   const div = document.createElement("div");
-  div.className = `media-placeholder ${context}`;
-  div.textContent = label;
+  const isLoading = label.trim().toLowerCase().startsWith("loading");
+  div.className = `media-placeholder ${context}${isLoading ? " loading" : ""}`;
+
+  const text = document.createElement("span");
+  text.className = "media-placeholder-text";
+  text.textContent = label;
+  div.appendChild(text);
+
+  if (isLoading) {
+    const spinner = document.createElement("span");
+    spinner.className = "media-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    div.prepend(spinner);
+  }
+
   return div;
 }
 

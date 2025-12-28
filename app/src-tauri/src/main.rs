@@ -27,9 +27,10 @@ use golden_thread_core::query::{
     update_tag,
 };
 use tauri::{Emitter, Manager};
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine;
-use image::imageops::FilterType;
+use serde_json::json;
+
+mod media_ipc;
+mod media_worker;
 
 fn validate_sha256(input: &str) -> Result<(), String> {
     if input.len() != 64 {
@@ -51,7 +52,7 @@ fn archive_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, CoreError> {
 }
 
 fn archive_dir(base: &PathBuf) -> Result<PathBuf, CoreError> {
-    let archive_dir = base.join("golden-thread");
+    let archive_dir = base.join("golden-thread.noindex");
     if !archive_dir.exists() {
         fs::create_dir_all(&archive_dir).map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
     }
@@ -67,27 +68,97 @@ fn diagnostics_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, CoreError> 
     Ok(archive_dir.join("logs"))
 }
 
-fn attachments_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, CoreError> {
+fn previews_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, CoreError> {
     let base = app_handle
         .path()
         .app_data_dir()
         .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
     let archive_dir = archive_dir(&base)?;
-    Ok(archive_dir.join("attachments"))
+    let previews = archive_dir.join("previews");
+    if !previews.exists() {
+        fs::create_dir_all(&previews).map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
+    }
+    Ok(previews)
 }
 
-fn thumbs_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, CoreError> {
-    let base = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
-    let archive_dir = archive_dir(&base)?;
-    Ok(archive_dir.join("thumbs"))
+fn clear_preview_cache(app_handle: &tauri::AppHandle) {
+    if let Ok(base) = previews_dir(app_handle) {
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::create_dir_all(&base);
+    }
 }
+
 
 #[derive(Default)]
 struct DbState {
     db: Mutex<Option<golden_thread_core::ArchiveDb>>,
+}
+
+struct MediaWorkerState {
+    worker: Mutex<Option<std::sync::Arc<media_worker::MediaWorkerClient>>>,
+}
+
+impl Default for MediaWorkerState {
+    fn default() -> Self {
+        Self {
+            worker: Mutex::new(None),
+        }
+    }
+}
+
+fn with_worker<F, T>(app_handle: &tauri::AppHandle, state: &tauri::State<MediaWorkerState>, f: F) -> Result<T, String>
+where
+    F: FnOnce(&media_worker::MediaWorkerClient) -> Result<T, String>,
+{
+    let mut guard = state.worker.lock().map_err(|_| "worker lock poisoned".to_string())?;
+    if guard.is_none() {
+        let archive = archive_dir(
+            &app_handle
+                .path()
+                .app_data_dir()
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let log_dir = diagnostics_dir(app_handle).ok();
+        *guard = Some(std::sync::Arc::new(media_worker::MediaWorkerClient::spawn(
+            archive, log_dir,
+        )?));
+    }
+    let worker = guard.as_ref().ok_or_else(|| "worker unavailable".to_string())?.clone();
+    drop(guard);
+    f(&worker)
+}
+
+async fn with_worker_async<F, T>(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, MediaWorkerState>,
+    f: F,
+) -> Result<T, String>
+where
+    F: FnOnce(&media_worker::MediaWorkerClient) -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    let worker = {
+        let mut guard = state.worker.lock().map_err(|_| "worker lock poisoned".to_string())?;
+        if guard.is_none() {
+            let archive = archive_dir(
+                &app_handle
+                    .path()
+                    .app_data_dir()
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let log_dir = diagnostics_dir(&app_handle).ok();
+            *guard = Some(std::sync::Arc::new(media_worker::MediaWorkerClient::spawn(
+                archive, log_dir,
+            )?));
+        }
+        guard.as_ref().ok_or_else(|| "worker unavailable".to_string())?.clone()
+    };
+
+    tauri::async_runtime::spawn_blocking(move || f(&worker))
+        .await
+        .map_err(|_| "worker task failed".to_string())?
 }
 
 fn with_db<F, T>(app_handle: &tauri::AppHandle, state: &tauri::State<DbState>, f: F) -> Result<T, CoreError>
@@ -306,8 +377,9 @@ fn list_message_attachments_cmd(
 }
 
 #[tauri::command]
-fn attachment_data_url_cmd(
+async fn attachment_data_url_cmd(
     app_handle: tauri::AppHandle,
+    state: tauri::State<'_, MediaWorkerState>,
     sha256: String,
     mime: String,
 ) -> Result<String, String> {
@@ -315,8 +387,6 @@ fn attachment_data_url_cmd(
     if !(mime.starts_with("image/") || mime.starts_with("video/") || mime.starts_with("audio/")) {
         return Err("unsupported media type".to_string());
     }
-    let path = attachments_dir(&app_handle).map_err(|e| e.to_string())?.join(&sha256);
-    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
     let max_bytes: u64 = if mime.starts_with("image/") {
         12 * 1024 * 1024
     } else if mime.starts_with("audio/") {
@@ -324,49 +394,50 @@ fn attachment_data_url_cmd(
     } else {
         35 * 1024 * 1024
     };
-    if meta.len() > max_bytes {
-        return Err("media too large to preview".to_string());
-    }
-    let data = fs::read(&path).map_err(|e| e.to_string())?;
-    let encoded = BASE64_STANDARD.encode(data);
-    Ok(format!("data:{};base64,{}", mime, encoded))
+    with_worker_async(app_handle, state, move |worker| {
+        let payload = serde_json::to_value(media_ipc::DataUrlRequest {
+            sha256,
+            mime,
+            max_bytes,
+        })
+        .map_err(|e| e.to_string())?;
+        let resp = worker.request("data_url", payload)?;
+        if !resp.ok {
+            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
+        }
+        let payload = resp.payload.ok_or_else(|| "missing payload".to_string())?;
+        let data: media_ipc::DataUrlResponse = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+        Ok(data.data_url)
+    })
+    .await
 }
 
 #[tauri::command]
-fn attachment_path_cmd(
+async fn attachment_path_cmd(
     app_handle: tauri::AppHandle,
+    state: tauri::State<'_, MediaWorkerState>,
     sha256: String,
     mime: Option<String>,
 ) -> Result<String, String> {
     validate_sha256(&sha256)?;
-    let base = attachments_dir(&app_handle).map_err(|e| e.to_string())?;
-    let path = base.join(&sha256);
-    if !path.exists() {
-        return Err("attachment missing".to_string());
-    }
-    let ext = mime
-        .as_deref()
-        .and_then(mime_extension)
-        .map(|s| s.to_string());
-    if let Some(ext) = ext {
-        let previews = base.join("previews");
-        fs::create_dir_all(&previews).map_err(|e| e.to_string())?;
-        let preview_path = previews.join(format!("{}.{}", sha256, ext));
-        if !preview_path.exists() {
-            if let Err(_) = fs::hard_link(&path, &preview_path) {
-                let _ = std::os::unix::fs::symlink(&path, &preview_path);
-            }
+    with_worker_async(app_handle, state, move |worker| {
+        let payload = serde_json::to_value(media_ipc::MediaRequest { sha256, mime })
+            .map_err(|e| e.to_string())?;
+        let resp = worker.request("media", payload)?;
+        if !resp.ok {
+            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
         }
-        if preview_path.exists() {
-            return Ok(preview_path.to_string_lossy().to_string());
-        }
-    }
-    Ok(path.to_string_lossy().to_string())
+        let payload = resp.payload.ok_or_else(|| "missing payload".to_string())?;
+        let data: media_ipc::MediaResponse = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+        Ok(data.path)
+    })
+    .await
 }
 
 #[tauri::command]
-fn attachment_thumbnail_cmd(
+async fn attachment_thumbnail_cmd(
     app_handle: tauri::AppHandle,
+    state: tauri::State<'_, MediaWorkerState>,
     sha256: String,
     mime: Option<String>,
     max_size: u32,
@@ -377,42 +448,21 @@ fn attachment_thumbnail_cmd(
             return Err("thumbnail only for images".to_string());
         }
     }
-    let src = attachments_dir(&app_handle).map_err(|e| e.to_string())?.join(&sha256);
-    if !src.exists() {
-        return Err("attachment missing".to_string());
-    }
-    let thumbs = thumbs_dir(&app_handle).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&thumbs).map_err(|e| e.to_string())?;
-    let thumb_path = thumbs.join(format!("{}_{}.jpg", sha256, max_size));
-    if thumb_path.exists() {
-        return Ok(thumb_path.to_string_lossy().to_string());
-    }
-    let img = image::open(&src).map_err(|e| e.to_string())?;
-    let resized = img.resize(max_size, max_size, FilterType::Triangle);
-    resized
-        .save(&thumb_path)
+    with_worker_async(app_handle, state, move |worker| {
+        let payload = serde_json::to_value(media_ipc::ThumbRequest {
+            sha256,
+            max_size,
+        })
         .map_err(|e| e.to_string())?;
-    Ok(thumb_path.to_string_lossy().to_string())
-}
-
-fn mime_extension(mime: &str) -> Option<&'static str> {
-    match mime {
-        "image/jpeg" => Some("jpg"),
-        "image/png" => Some("png"),
-        "image/webp" => Some("webp"),
-        "image/gif" => Some("gif"),
-        "image/heic" => Some("heic"),
-        "video/mp4" => Some("mp4"),
-        "video/quicktime" => Some("mov"),
-        "video/webm" => Some("webm"),
-        "video/x-matroska" => Some("mkv"),
-        "audio/mpeg" => Some("mp3"),
-        "audio/mp4" => Some("m4a"),
-        "audio/aac" => Some("aac"),
-        "audio/ogg" => Some("ogg"),
-        "audio/wav" => Some("wav"),
-        _ => None,
-    }
+        let resp = worker.request("thumb", payload)?;
+        if !resp.ok {
+            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
+        }
+        let payload = resp.payload.ok_or_else(|| "missing payload".to_string())?;
+        let data: media_ipc::ThumbResponse = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+        Ok(data.data_url)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -474,6 +524,7 @@ fn reset_archive_cmd(app_handle: tauri::AppHandle, state: tauri::State<DbState>)
     let archive_shm = archive_dir.join("archive.sqlite-shm");
     let attachments_dir = archive_dir.join("attachments");
     let thumbs_dir = archive_dir.join("thumbs");
+    let previews_dir = archive_dir.join("previews");
 
     if archive_path.exists() {
         fs::remove_file(&archive_path).map_err(|e| e.to_string())?;
@@ -490,6 +541,16 @@ fn reset_archive_cmd(app_handle: tauri::AppHandle, state: tauri::State<DbState>)
     if thumbs_dir.exists() {
         fs::remove_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
     }
+    if previews_dir.exists() {
+        fs::remove_dir_all(&previews_dir).map_err(|e| e.to_string())?;
+    }
+    let _ = with_worker(&app_handle, &app_handle.state::<MediaWorkerState>(), |worker| {
+        let resp = worker.request("clear_cache", json!({}))?;
+        if !resp.ok {
+            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
+        }
+        Ok(())
+    });
     if let Ok(mut guard) = state.db.lock() {
         *guard = None;
     }
@@ -505,6 +566,39 @@ fn get_diagnostics_cmd(app_handle: tauri::AppHandle) -> Result<String, String> {
         return Ok("No diagnostics available.".to_string());
     }
     fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn clear_media_cache_cmd(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, MediaWorkerState>,
+) -> Result<(), String> {
+    clear_preview_cache(&app_handle);
+    with_worker_async(app_handle, state, move |worker| {
+        let resp = worker.request("clear_cache", json!({}))?;
+        if !resp.ok {
+            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn drain_media_evictions_cmd(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, MediaWorkerState>,
+) -> Result<Vec<String>, String> {
+    with_worker_async(app_handle, state, move |worker| {
+        let resp = worker.request("drain_evictions", json!({}))?;
+        if !resp.ok {
+            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
+        }
+        let payload = resp.payload.ok_or_else(|| "missing payload".to_string())?;
+        let data: media_ipc::EvictionsResponse = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+        Ok(data.sha256s)
+    })
+    .await
 }
 
 // ===== Tag Commands =====
@@ -584,14 +678,19 @@ fn list_scrapbook_messages_cmd(
 }
 
 fn main() {
+    if media_worker::maybe_run_worker() {
+        return;
+    }
     tauri::Builder::default()
         .manage(DbState::default())
+        .manage(MediaWorkerState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             if let Ok(log_dir) = diagnostics_dir(&app.handle()) {
                 let _ = diagnostics::log_event(&log_dir, "app_start", "app started");
             }
+            clear_preview_cache(&app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -610,6 +709,8 @@ fn main() {
             attachment_thumbnail_cmd,
             archive_stats_cmd,
             get_diagnostics_cmd,
+            clear_media_cache_cmd,
+            drain_media_evictions_cmd,
             seed_demo_cmd,
             import_backup_cmd,
             reset_archive_cmd,
