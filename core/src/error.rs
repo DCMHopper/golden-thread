@@ -10,4 +10,6 @@ pub enum CoreError {
     InvalidPassphrase(String),
     #[error("not implemented: {0}")]
     NotImplemented(String),
+    #[error("crypto error: {0}")]
+    Crypto(String),
 }

@@ -119,6 +119,24 @@ Add ability to filter/search messages within the currently open thread:
 **Priority:** Low-Medium
 **Effort:** Medium
 
+## Performance & Media Handling
+
+### Thumbnail Warmup (Deferred)
+**Priority:** Medium
+**Effort:** Medium
+
+We experimented with post-import thumbnail warmup (precompute encrypted thumbnails to smooth gallery scrolling), but deferred it due to high CPU usage and long runtimes on large archives. Current approach favors on-demand thumbnail generation with concurrency caps and in-memory caching for smooth scrolling without sustained background load.
+
+**Context & decision:**
+- Warmup improves first-load gallery performance.
+- On large archives it can peg CPU for a long time and gets interrupted by app quit.
+- We chose to disable warmup for now and revisit after other performance work stabilizes.
+
+**Future options:**
+- Add progress/status UI and throttle CPU.
+- Limit warmup to recent media or run only while idle.
+- Make warmup user-configurable.
+
 Export a conversation as a file:
 - Export as HTML (styled, self-contained)
 - Export as plain text

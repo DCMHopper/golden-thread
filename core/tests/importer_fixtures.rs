@@ -2,9 +2,14 @@ use std::fs;
 use std::path::Path;
 
 use golden_thread_core::importer::import_from_signal_db_for_tests;
-use golden_thread_core::{open_archive, CoreError};
+use golden_thread_core::{crypto, open_archive, CoreError};
 use rusqlite::Connection;
 use tempfile::tempdir;
+
+fn set_test_key() {
+    crypto::set_test_key_from_passphrase("golden-thread-tests");
+}
+
 
 fn create_signal_db(path: &Path) -> Result<(), CoreError> {
     let conn = Connection::open(path)?;
@@ -100,6 +105,7 @@ fn create_signal_db(path: &Path) -> Result<(), CoreError> {
 
 #[test]
 fn importer_ingests_messages_attachments_reactions() {
+    set_test_key();
     let tmp = tempdir().expect("temp");
     let signal_db = tmp.path().join("signal.sqlite");
     create_signal_db(&signal_db).expect("signal db");
@@ -144,6 +150,7 @@ fn importer_ingests_messages_attachments_reactions() {
 
 #[test]
 fn importer_handles_missing_attachment_files() {
+    set_test_key();
     let tmp = tempdir().expect("temp");
     let signal_db = tmp.path().join("signal.sqlite");
     create_signal_db(&signal_db).expect("signal db");
@@ -168,6 +175,7 @@ fn importer_handles_missing_attachment_files() {
 
 #[test]
 fn importer_dedupes_attachment_files_by_hash() {
+    set_test_key();
     let tmp = tempdir().expect("temp");
     let signal_db = tmp.path().join("signal.sqlite");
     let conn = Connection::open(&signal_db).expect("db");
@@ -246,6 +254,7 @@ fn importer_dedupes_attachment_files_by_hash() {
 
 #[test]
 fn importer_handles_missing_attachment_metadata() {
+    set_test_key();
     let tmp = tempdir().expect("temp");
     let signal_db = tmp.path().join("signal.sqlite");
     let conn = Connection::open(&signal_db).expect("db");
@@ -300,6 +309,7 @@ fn importer_handles_missing_attachment_metadata() {
 
 #[test]
 fn importer_idempotent_same_archive() {
+    set_test_key();
     let tmp = tempdir().expect("temp");
     let signal_db = tmp.path().join("signal.sqlite");
     create_signal_db(&signal_db).expect("signal db");
@@ -330,6 +340,7 @@ fn importer_idempotent_same_archive() {
 
 #[test]
 fn importer_incremental_adds_new_messages_only() {
+    set_test_key();
     let tmp = tempdir().expect("temp");
     let signal_db_a = tmp.path().join("signal_a.sqlite");
     create_signal_db(&signal_db_a).expect("signal db a");
@@ -364,6 +375,7 @@ fn importer_incremental_adds_new_messages_only() {
 }
 #[test]
 fn importer_handles_missing_optional_columns() {
+    set_test_key();
     let tmp = tempdir().expect("temp");
     let signal_db = tmp.path().join("signal.sqlite");
     let conn = Connection::open(&signal_db).expect("db");

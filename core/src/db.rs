@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
+use crate::crypto;
 use crate::error::CoreError;
 use crate::migrations::MIGRATIONS;
 
@@ -14,13 +15,18 @@ pub struct ArchiveDb {
 pub fn open_archive(path: impl AsRef<Path>) -> Result<ArchiveDb, CoreError> {
     let path = path.as_ref().to_path_buf();
     let conn = Connection::open(&path)?;
+    let key = crypto::load_or_create_master_key()?;
+    crypto::apply_sqlcipher_key(&conn, &key)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL; \
          PRAGMA synchronous = NORMAL; \
          PRAGMA foreign_keys = ON; \
          PRAGMA journal_size_limit = 67108864; \
-         PRAGMA temp_store = MEMORY;",
+         PRAGMA temp_store = MEMORY; \
+         PRAGMA cache_size = -20000; \
+         PRAGMA mmap_size = 268435456; \
+         PRAGMA cipher_memory_security = OFF;",
     )?;
     apply_migrations(&conn)?;
     conn.execute(

@@ -1,11 +1,16 @@
 use std::fs;
 use std::path::Path;
 
+use golden_thread_core::crypto;
 use golden_thread_core::importer::import_from_signal_db_for_tests;
 use golden_thread_core::query::{list_messages, list_thread_media, list_threads, search_messages};
 use golden_thread_core::open_archive;
 use rusqlite::Connection;
 use tempfile::tempdir;
+
+fn set_test_key() {
+    crypto::set_test_key_from_passphrase("golden-thread-tests");
+}
 
 fn create_signal_db(path: &Path) {
     let conn = Connection::open(path).expect("db");
@@ -49,6 +54,7 @@ fn create_signal_db(path: &Path) {
 
 #[test]
 fn pipeline_import_populates_queries() {
+    set_test_key();
     let tmp = tempdir().expect("temp");
     let signal_db = tmp.path().join("signal.sqlite");
     create_signal_db(&signal_db);
