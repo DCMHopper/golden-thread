@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
+use hkdf::Hkdf;
 use keyring::Error as KeyringError;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -34,6 +35,47 @@ impl MasterKey {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+}
+
+/// Purpose-specific derived key for domain separation.
+pub struct DerivedKey(Zeroizing<[u8; 32]>);
+
+impl DerivedKey {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Key purposes for HKDF domain separation.
+/// Each purpose produces a cryptographically independent key from the master key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPurpose {
+    /// Key for SQLCipher database encryption
+    Database,
+    /// Key for attachment file encryption
+    Attachments,
+}
+
+impl KeyPurpose {
+    fn info(&self) -> &'static [u8] {
+        match self {
+            KeyPurpose::Database => b"golden-thread-db-v1",
+            KeyPurpose::Attachments => b"golden-thread-attachments-v1",
+        }
+    }
+}
+
+/// Derives a purpose-specific key from the master key using HKDF-SHA256.
+///
+/// This provides cryptographic domain separation so that compromising one
+/// derived key (e.g., through a side-channel attack on file encryption)
+/// does not directly compromise other uses of the master key.
+pub fn derive_key(master: &MasterKey, purpose: KeyPurpose) -> Result<DerivedKey, CoreError> {
+    let hk = Hkdf::<Sha256>::new(None, master.as_bytes());
+    let mut okm = [0u8; 32];
+    hk.expand(purpose.info(), &mut okm)
+        .map_err(|_| CoreError::Crypto("HKDF expand failed".to_string()))?;
+    Ok(DerivedKey(Zeroizing::new(okm)))
 }
 
 static MASTER_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
@@ -85,11 +127,32 @@ pub fn load_or_create_master_key() -> Result<MasterKey, CoreError> {
     }
 }
 
+/// Applies the SQLCipher encryption key to a database connection.
+///
+/// NOTE: This currently uses the master key directly for backward compatibility
+/// with existing databases. A future version should migrate to using
+/// `derive_key(key, KeyPurpose::Database)` with a proper re-keying migration.
 pub fn apply_sqlcipher_key(conn: &rusqlite::Connection, key: &MasterKey) -> Result<(), CoreError> {
     let hex_key = hex::encode(key.as_bytes());
     let pragma = format!("PRAGMA key = \"x'{hex_key}'\";");
     conn.execute_batch(&pragma)?;
     Ok(())
+}
+
+/// Applies a derived SQLCipher key to a database connection.
+/// Use this for new databases that should use key derivation from the start.
+pub fn apply_sqlcipher_key_derived(conn: &rusqlite::Connection, key: &MasterKey) -> Result<(), CoreError> {
+    let db_key = derive_key(key, KeyPurpose::Database)?;
+    let hex_key = hex::encode(db_key.as_bytes());
+    let pragma = format!("PRAGMA key = \"x'{hex_key}'\";");
+    conn.execute_batch(&pragma)?;
+    Ok(())
+}
+
+/// Returns a derived key for encrypting attachments.
+/// Use this instead of the raw master key to provide domain separation.
+pub fn attachment_key(master: &MasterKey) -> Result<DerivedKey, CoreError> {
+    derive_key(master, KeyPurpose::Attachments)
 }
 
 pub fn encrypt_stream_with_hash<R: Read, W: Write>(
@@ -469,5 +532,32 @@ mod tests {
         decrypt_file_parallel(&enc, &out, &key, 4).expect("decrypt");
         let roundtrip = fs::read(&out).expect("read");
         assert_eq!(roundtrip, data);
+    }
+
+    #[test]
+    fn derive_key_produces_different_keys_per_purpose() {
+        set_test_key_from_passphrase("golden-thread-tests");
+        let master = load_or_create_master_key().expect("key");
+
+        let db_key = derive_key(&master, KeyPurpose::Database).expect("db key");
+        let attach_key = derive_key(&master, KeyPurpose::Attachments).expect("attach key");
+
+        // Derived keys should be different from each other
+        assert_ne!(db_key.as_bytes(), attach_key.as_bytes());
+        // Derived keys should be different from the master key
+        assert_ne!(db_key.as_bytes(), master.as_bytes());
+        assert_ne!(attach_key.as_bytes(), master.as_bytes());
+    }
+
+    #[test]
+    fn derive_key_is_deterministic() {
+        set_test_key_from_passphrase("golden-thread-tests");
+        let master = load_or_create_master_key().expect("key");
+
+        let key1 = derive_key(&master, KeyPurpose::Database).expect("key1");
+        let key2 = derive_key(&master, KeyPurpose::Database).expect("key2");
+
+        // Same master + purpose should produce same derived key
+        assert_eq!(key1.as_bytes(), key2.as_bytes());
     }
 }

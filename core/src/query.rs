@@ -3,6 +3,51 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::error::CoreError;
 use crate::models::{ArchiveStats, MediaRow, MessageRow, ReactionSummary, ScrapbookMessage, SearchHit, Tag, ThreadMediaRow, ThreadSummary, MessageTags};
 
+fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRow> {
+    Ok(MessageRow {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        sender_id: row.get(2)?,
+        sent_at: row.get(3)?,
+        received_at: row.get(4)?,
+        message_type: row.get(5)?,
+        body: row.get(6)?,
+        is_outgoing: row.get::<_, i64>(7)? != 0,
+        is_view_once: row.get::<_, i64>(8)? != 0,
+        quote_message_id: row.get(9)?,
+        metadata_json: row.get(10)?,
+    })
+}
+
+fn media_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaRow> {
+    Ok(MediaRow {
+        id: row.get(0)?,
+        message_id: row.get(1)?,
+        sha256: row.get(2)?,
+        mime: row.get(3)?,
+        size_bytes: row.get(4)?,
+        original_filename: row.get(5)?,
+        kind: row.get(6)?,
+        width: row.get(7)?,
+        height: row.get(8)?,
+        duration_ms: row.get(9)?,
+    })
+}
+
+fn tag_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Tag> {
+    Ok(Tag {
+        id: row.get(offset)?,
+        name: row.get(offset + 1)?,
+        color: row.get(offset + 2)?,
+        created_at: row.get(offset + 3)?,
+        display_order: row.get(offset + 4)?,
+    })
+}
+
+fn placeholders(count: usize) -> String {
+    std::iter::repeat("?").take(count).collect::<Vec<_>>().join(",")
+}
+
 pub fn list_threads(conn: &Connection, limit: i64, offset: i64) -> Result<Vec<ThreadSummary>, CoreError> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, t.last_message_at, \
@@ -68,21 +113,7 @@ pub fn list_messages(
         ),
     };
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), |row| {
-        Ok(MessageRow {
-            id: row.get(0)?,
-            thread_id: row.get(1)?,
-            sender_id: row.get(2)?,
-            sent_at: row.get(3)?,
-            received_at: row.get(4)?,
-            message_type: row.get(5)?,
-            body: row.get(6)?,
-            is_outgoing: row.get::<_, i64>(7)? != 0,
-            is_view_once: row.get::<_, i64>(8)? != 0,
-            quote_message_id: row.get(9)?,
-            metadata_json: row.get(10)?,
-        })
-    })?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), message_from_row)?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
@@ -122,21 +153,7 @@ pub fn list_messages_after(
         ),
     };
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), |row| {
-        Ok(MessageRow {
-            id: row.get(0)?,
-            thread_id: row.get(1)?,
-            sender_id: row.get(2)?,
-            sent_at: row.get(3)?,
-            received_at: row.get(4)?,
-            message_type: row.get(5)?,
-            body: row.get(6)?,
-            is_outgoing: row.get::<_, i64>(7)? != 0,
-            is_view_once: row.get::<_, i64>(8)? != 0,
-            quote_message_id: row.get(9)?,
-            metadata_json: row.get(10)?,
-        })
-    })?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), message_from_row)?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
@@ -147,21 +164,7 @@ pub fn get_message(conn: &Connection, message_id: &str) -> Result<MessageRow, Co
          FROM messages \
          WHERE id = ?1;",
         params![message_id],
-        |row| {
-            Ok(MessageRow {
-                id: row.get(0)?,
-                thread_id: row.get(1)?,
-                sender_id: row.get(2)?,
-                sent_at: row.get(3)?,
-                received_at: row.get(4)?,
-                message_type: row.get(5)?,
-                body: row.get(6)?,
-                is_outgoing: row.get::<_, i64>(7)? != 0,
-                is_view_once: row.get::<_, i64>(8)? != 0,
-                quote_message_id: row.get(9)?,
-                metadata_json: row.get(10)?,
-            })
-        },
+        message_from_row,
     )
     .map_err(CoreError::from)
 }
@@ -202,19 +205,7 @@ pub fn search_messages(
          LIMIT ?3 OFFSET ?4;",
     )?;
     let rows = stmt.query_map(params![query, thread_id, limit, offset], |row| {
-        let message = MessageRow {
-            id: row.get(0)?,
-            thread_id: row.get(1)?,
-            sender_id: row.get(2)?,
-            sent_at: row.get(3)?,
-            received_at: row.get(4)?,
-            message_type: row.get(5)?,
-            body: row.get(6)?,
-            is_outgoing: row.get::<_, i64>(7)? != 0,
-            is_view_once: row.get::<_, i64>(8)? != 0,
-            quote_message_id: row.get(9)?,
-            metadata_json: row.get(10)?,
-        };
+        let message = message_from_row(row)?;
         Ok(SearchHit {
             message,
             rank: row.get(11)?,
@@ -230,13 +221,7 @@ pub fn list_reactions_for_messages(
     if message_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut placeholders = String::new();
-    for (idx, _) in message_ids.iter().enumerate() {
-        if idx > 0 {
-            placeholders.push(',');
-        }
-        placeholders.push('?');
-    }
+    let placeholders = placeholders(message_ids.len());
     let sql = format!(
         "SELECT message_id, emoji, COUNT(1) \
          FROM reactions \
@@ -272,20 +257,7 @@ pub fn list_media(
          ORDER BY m.sent_at DESC NULLS LAST, a.id ASC \
          LIMIT ?2 OFFSET ?3;",
     )?;
-    let rows = stmt.query_map(params![thread_id, limit, offset], |row| {
-        Ok(MediaRow {
-            id: row.get(0)?,
-            message_id: row.get(1)?,
-            sha256: row.get(2)?,
-            mime: row.get(3)?,
-            size_bytes: row.get(4)?,
-            original_filename: row.get(5)?,
-            kind: row.get(6)?,
-            width: row.get(7)?,
-            height: row.get(8)?,
-            duration_ms: row.get(9)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![thread_id, limit, offset], media_from_row)?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
@@ -374,20 +346,7 @@ pub fn list_attachments_for_message(
          WHERE message_id = ?1 \
          ORDER BY id ASC;",
     )?;
-    let rows = stmt.query_map(params![message_id], |row| {
-        Ok(MediaRow {
-            id: row.get(0)?,
-            message_id: row.get(1)?,
-            sha256: row.get(2)?,
-            mime: row.get(3)?,
-            size_bytes: row.get(4)?,
-            original_filename: row.get(5)?,
-            kind: row.get(6)?,
-            width: row.get(7)?,
-            height: row.get(8)?,
-            duration_ms: row.get(9)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![message_id], media_from_row)?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
@@ -423,19 +382,13 @@ pub fn list_tags(conn: &Connection) -> Result<Vec<Tag>, CoreError> {
          FROM tags \
          ORDER BY display_order ASC, created_at ASC;"
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Tag {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            color: row.get(2)?,
-            created_at: row.get(3)?,
-            display_order: row.get(4)?,
-        })
-    })?;
+    let rows = stmt.query_map([], |row| tag_from_row(row, 0))?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
 pub fn create_tag(conn: &Connection, name: &str, color: &str) -> Result<Tag, CoreError> {
+    let tx = conn.unchecked_transaction()?;
+
     // Generate a simple ID (timestamp-based)
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -444,17 +397,18 @@ pub fn create_tag(conn: &Connection, name: &str, color: &str) -> Result<Tag, Cor
     let id = format!("tag:{}", now);
 
     // Get next display order
-    let max_order: Option<i64> = conn
+    let max_order: Option<i64> = tx
         .query_row("SELECT MAX(display_order) FROM tags;", [], |row| row.get(0))
         .optional()?
         .flatten();
     let display_order = max_order.unwrap_or(-1) + 1;
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO tags (id, name, color, created_at, display_order) VALUES (?1, ?2, ?3, ?4, ?5);",
         params![&id, name, color, now, display_order],
     )?;
 
+    tx.commit()?;
     Ok(Tag {
         id,
         name: name.to_string(),
@@ -486,15 +440,7 @@ pub fn get_message_tags(conn: &Connection, message_id: &str) -> Result<Vec<Tag>,
          WHERE mt.message_id = ?1 \
          ORDER BY t.display_order ASC, t.created_at ASC;"
     )?;
-    let rows = stmt.query_map(params![message_id], |row| {
-        Ok(Tag {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            color: row.get(2)?,
-            created_at: row.get(3)?,
-            display_order: row.get(4)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![message_id], |row| tag_from_row(row, 0))?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
@@ -502,10 +448,7 @@ pub fn get_message_tags_bulk(conn: &Connection, message_ids: &[String]) -> Resul
     if message_ids.is_empty() {
         return Ok(vec![]);
     }
-    let placeholders = std::iter::repeat("?")
-        .take(message_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let placeholders = placeholders(message_ids.len());
     let sql = format!(
         "SELECT mt.message_id, t.id, t.name, t.color, t.created_at, t.display_order \
          FROM message_tags mt \
@@ -516,16 +459,7 @@ pub fn get_message_tags_bulk(conn: &Connection, message_ids: &[String]) -> Resul
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(message_ids.iter()), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            Tag {
-                id: row.get(1)?,
-                name: row.get(2)?,
-                color: row.get(3)?,
-                created_at: row.get(4)?,
-                display_order: row.get(5)?,
-            },
-        ))
+        Ok((row.get::<_, String>(0)?, tag_from_row(row, 1)?))
     })?;
 
     let mut map: std::collections::HashMap<String, Vec<Tag>> = std::collections::HashMap::new();
@@ -546,8 +480,10 @@ pub fn get_message_tags_bulk(conn: &Connection, message_ids: &[String]) -> Resul
 }
 
 pub fn set_message_tags(conn: &Connection, message_id: &str, tag_ids: &[String]) -> Result<(), CoreError> {
+    let tx = conn.unchecked_transaction()?;
+
     // Delete existing tags for this message
-    conn.execute("DELETE FROM message_tags WHERE message_id = ?1;", params![message_id])?;
+    tx.execute("DELETE FROM message_tags WHERE message_id = ?1;", params![message_id])?;
 
     // Insert new tags
     let now = std::time::SystemTime::now()
@@ -556,12 +492,13 @@ pub fn set_message_tags(conn: &Connection, message_id: &str, tag_ids: &[String])
         .as_millis() as i64;
 
     for tag_id in tag_ids {
-        conn.execute(
+        tx.execute(
             "INSERT INTO message_tags (message_id, tag_id, tagged_at) VALUES (?1, ?2, ?3);",
             params![message_id, tag_id, now],
         )?;
     }
 
+    tx.commit()?;
     Ok(())
 }
 

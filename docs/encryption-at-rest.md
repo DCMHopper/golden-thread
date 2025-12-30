@@ -1,36 +1,36 @@
-## Encryption at rest + decryption flow (UI + worker)
+## Encryption at rest + decryption flow
 
 ### Goals (v1)
 - All imported Signal data is read-only.
 - Sensitive data is encrypted at rest on disk (database + attachments + thumbs).
 - Decryption happens only on demand and only for display.
-- UI stays responsive: heavy decrypt work runs in a separate process (media worker).
+- UI stays responsive: heavy decrypt work runs on a blocking thread pool via `spawn_blocking`.
 - No network calls by default.
 
 ### What is encrypted at rest
-- `archive.sqlite` is encrypted via SQLCipher. The master key is stored in macOS Keychain and loaded on startup.
+- `archive.sqlite` is encrypted via SQLCipher. The master key is stored in macOS Keychain and loaded once on first use.
 - `attachments/` store encrypted blobs, named by SHA256.
 - `thumbs/` store encrypted WebP thumbnails (per size, per attachment).
 - `previews/session/media/` stores *temporary* decrypted media files for playback. These are not durable and are cleared on exit or eviction.
 
 ### Decryption model (high level)
-- **UI process never decrypts on its own.**
-- A **media worker** process does all decryption and thumbnail work.
-- UI talks to the worker via Tauri commands -> IPC over stdin/stdout JSON.
-- Worker responses return either:
+- **Tauri commands are async** - they return Promises to the frontend.
+- **CPU-bound work uses `spawn_blocking`** - decryption and thumbnail generation run on tokio's blocking thread pool, keeping the async runtime responsive.
+- **Single process** - all operations run in the main Tauri process; no subprocess IPC overhead.
+- Responses return either:
   - a data URL (for small items / thumbnails), or
   - a temp file path (for large video/audio/image).
 
-### UI <-> Worker interaction (commands)
+### Tauri commands (media operations)
 - `attachment_thumbnail_cmd`: returns a data URL for image thumbnails.
 - `attachment_data_url_cmd`: returns a data URL (small media only).
 - `attachment_path_cmd`: decrypts to a temp file, returns a path for `convertFileSrc()`.
-- `clear_media_cache_cmd`: clears temp preview cache + signals worker to purge.
-- `drain_media_evictions_cmd`: returns SHA256s of media files evicted by worker LRU/TTL.
+- `clear_media_cache_cmd`: clears temp preview cache.
+- `drain_media_evictions_cmd`: returns SHA256s of media files evicted by LRU/TTL.
 
 ### Temp media cache + eviction
-- Worker keeps a small LRU cache of decrypted media files (max count + TTL).
-- When evicted, worker returns SHA256s on `drain_media_evictions_cmd`.
+- An in-memory LRU cache tracks decrypted media files (max count + TTL).
+- When evicted, SHA256s are returned on `drain_media_evictions_cmd`.
 - UI polls evictions while Gallery is active and resets matching cards to "Click to load".
 - On gallery exit, UI clears media cache and restores placeholders.
 
@@ -93,9 +93,9 @@ The `GT_MASTER_KEY_HEX` environment variable allows overriding the master key fo
 **Rationale:** Environment variables are visible via `ps eww` on macOS, which would expose the key to other processes. Release builds must use the macOS Keychain.
 
 ### Where to look in code
-- Worker + IPC: `app/src-tauri/src/media_worker.rs`, `app/src-tauri/src/media_ipc.rs`
+- Media operations: `app/src-tauri/src/media_ops.rs`
 - Tauri commands: `app/src-tauri/src/main.rs`
-- Gallery UI + placeholders: `app/src/main.ts`
+- Gallery UI + placeholders: `app/src/ui/gallery.ts`
 - Crypto primitives: `core/src/crypto.rs`
 - Importer encryption: `core/src/importer/attachments.rs`
 

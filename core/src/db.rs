@@ -17,7 +17,7 @@ pub fn open_archive(path: impl AsRef<Path>) -> Result<ArchiveDb, CoreError> {
     let conn = Connection::open(&path)?;
     let key = crypto::load_or_create_master_key()?;
     crypto::apply_sqlcipher_key(&conn, &key)?;
-    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.busy_timeout(Duration::from_millis(500))?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL; \
          PRAGMA synchronous = NORMAL; \

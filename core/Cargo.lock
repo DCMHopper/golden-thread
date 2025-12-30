@@ -679,6 +679,7 @@ dependencies = [
  "chrono",
  "cmake",
  "hex",
+ "hkdf",
  "keyring",
  "libc",
  "rand",

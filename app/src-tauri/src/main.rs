@@ -27,10 +27,8 @@ use golden_thread_core::query::{
     update_tag,
 };
 use tauri::{Emitter, Manager};
-use serde_json::json;
 
-mod media_ipc;
-mod media_worker;
+mod media_ops;
 
 fn validate_sha256(input: &str) -> Result<(), String> {
     if input.len() != 64 {
@@ -94,71 +92,43 @@ struct DbState {
     db: Mutex<Option<golden_thread_core::ArchiveDb>>,
 }
 
-struct MediaWorkerState {
-    worker: Mutex<Option<std::sync::Arc<media_worker::MediaWorkerClient>>>,
+struct MediaState {
+    inner: Mutex<Option<std::sync::Arc<media_ops::MediaState>>>,
 }
 
-impl Default for MediaWorkerState {
+impl Default for MediaState {
     fn default() -> Self {
         Self {
-            worker: Mutex::new(None),
+            inner: Mutex::new(None),
         }
     }
 }
 
-fn with_worker<F, T>(app_handle: &tauri::AppHandle, state: &tauri::State<MediaWorkerState>, f: F) -> Result<T, String>
-where
-    F: FnOnce(&media_worker::MediaWorkerClient) -> Result<T, String>,
-{
-    let mut guard = state.worker.lock().map_err(|_| "worker lock poisoned".to_string())?;
+fn get_or_init_media(
+    app_handle: &tauri::AppHandle,
+    state: &tauri::State<MediaState>,
+) -> Result<std::sync::Arc<media_ops::MediaState>, String> {
+    let mut guard = state.inner.lock().map_err(|_| "media lock poisoned".to_string())?;
     if guard.is_none() {
-        let archive = archive_dir(
-            &app_handle
-                .path()
-                .app_data_dir()
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        let log_dir = diagnostics_dir(app_handle).ok();
-        *guard = Some(std::sync::Arc::new(media_worker::MediaWorkerClient::spawn(
-            archive, log_dir,
-        )?));
-    }
-    let worker = guard.as_ref().ok_or_else(|| "worker unavailable".to_string())?.clone();
-    drop(guard);
-    f(&worker)
-}
-
-async fn with_worker_async<F, T>(
-    app_handle: tauri::AppHandle,
-    state: tauri::State<'_, MediaWorkerState>,
-    f: F,
-) -> Result<T, String>
-where
-    F: FnOnce(&media_worker::MediaWorkerClient) -> Result<T, String> + Send + 'static,
-    T: Send + 'static,
-{
-    let worker = {
-        let mut guard = state.worker.lock().map_err(|_| "worker lock poisoned".to_string())?;
-        if guard.is_none() {
-            let archive = archive_dir(
-                &app_handle
-                    .path()
-                    .app_data_dir()
-                    .map_err(|e| e.to_string())?,
-            )
+        let base = app_handle
+            .path()
+            .app_data_dir()
             .map_err(|e| e.to_string())?;
-            let log_dir = diagnostics_dir(&app_handle).ok();
-            *guard = Some(std::sync::Arc::new(media_worker::MediaWorkerClient::spawn(
-                archive, log_dir,
-            )?));
-        }
-        guard.as_ref().ok_or_else(|| "worker unavailable".to_string())?.clone()
-    };
+        let archive = archive_dir(&base).map_err(|e| e.to_string())?;
 
-    tauri::async_runtime::spawn_blocking(move || f(&worker))
-        .await
-        .map_err(|_| "worker task failed".to_string())?
+        // Load master key ONCE for the entire app
+        let key = golden_thread_core::crypto::load_or_create_master_key()
+            .map_err(|e| e.to_string())?;
+
+        let media_state = media_ops::MediaState::new(
+            key,
+            archive.join("attachments"),
+            archive.join("thumbs"),
+            archive.join("previews").join("session").join("media"),
+        );
+        *guard = Some(std::sync::Arc::new(media_state));
+    }
+    guard.as_ref().ok_or_else(|| "media unavailable".to_string()).cloned()
 }
 
 fn with_db<F, T>(app_handle: &tauri::AppHandle, state: &tauri::State<DbState>, f: F) -> Result<T, CoreError>
@@ -379,7 +349,7 @@ fn list_message_attachments_cmd(
 #[tauri::command]
 async fn attachment_data_url_cmd(
     app_handle: tauri::AppHandle,
-    state: tauri::State<'_, MediaWorkerState>,
+    state: tauri::State<'_, MediaState>,
     sha256: String,
     mime: String,
 ) -> Result<String, String> {
@@ -394,50 +364,38 @@ async fn attachment_data_url_cmd(
     } else {
         35 * 1024 * 1024
     };
-    with_worker_async(app_handle, state, move |worker| {
-        let payload = serde_json::to_value(media_ipc::DataUrlRequest {
-            sha256,
-            mime,
-            max_bytes,
-        })
-        .map_err(|e| e.to_string())?;
-        let resp = worker.request("data_url", payload)?;
-        if !resp.ok {
-            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
-        }
-        let payload = resp.payload.ok_or_else(|| "missing payload".to_string())?;
-        let data: media_ipc::DataUrlResponse = serde_json::from_value(payload).map_err(|e| e.to_string())?;
-        Ok(data.data_url)
+
+    let media = get_or_init_media(&app_handle, &state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        media_ops::generate_data_url(&media, &sha256, &mime, max_bytes)
     })
     .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn attachment_path_cmd(
     app_handle: tauri::AppHandle,
-    state: tauri::State<'_, MediaWorkerState>,
+    state: tauri::State<'_, MediaState>,
     sha256: String,
     mime: Option<String>,
 ) -> Result<String, String> {
     validate_sha256(&sha256)?;
-    with_worker_async(app_handle, state, move |worker| {
-        let payload = serde_json::to_value(media_ipc::MediaRequest { sha256, mime })
-            .map_err(|e| e.to_string())?;
-        let resp = worker.request("media", payload)?;
-        if !resp.ok {
-            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
-        }
-        let payload = resp.payload.ok_or_else(|| "missing payload".to_string())?;
-        let data: media_ipc::MediaResponse = serde_json::from_value(payload).map_err(|e| e.to_string())?;
-        Ok(data.path)
+
+    let media = get_or_init_media(&app_handle, &state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        media_ops::decrypt_to_preview(&media, &sha256, mime.as_deref())
     })
     .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn attachment_thumbnail_cmd(
     app_handle: tauri::AppHandle,
-    state: tauri::State<'_, MediaWorkerState>,
+    state: tauri::State<'_, MediaState>,
     sha256: String,
     mime: Option<String>,
     max_size: u32,
@@ -448,21 +406,14 @@ async fn attachment_thumbnail_cmd(
             return Err("thumbnail only for images".to_string());
         }
     }
-    with_worker_async(app_handle, state, move |worker| {
-        let payload = serde_json::to_value(media_ipc::ThumbRequest {
-            sha256,
-            max_size,
-        })
-        .map_err(|e| e.to_string())?;
-        let resp = worker.request("thumb", payload)?;
-        if !resp.ok {
-            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
-        }
-        let payload = resp.payload.ok_or_else(|| "missing payload".to_string())?;
-        let data: media_ipc::ThumbResponse = serde_json::from_value(payload).map_err(|e| e.to_string())?;
-        Ok(data.data_url)
+
+    let media = get_or_init_media(&app_handle, &state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        media_ops::generate_thumbnail(&media, &sha256, max_size)
     })
     .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -513,7 +464,11 @@ async fn import_backup_cmd(app_handle: tauri::AppHandle, path: String, passphras
 }
 
 #[tauri::command]
-fn reset_archive_cmd(app_handle: tauri::AppHandle, state: tauri::State<DbState>) -> Result<(), String> {
+fn reset_archive_cmd(
+    app_handle: tauri::AppHandle,
+    db_state: tauri::State<DbState>,
+    media_state: tauri::State<MediaState>,
+) -> Result<(), String> {
     let base = app_handle
         .path()
         .app_data_dir()
@@ -544,14 +499,21 @@ fn reset_archive_cmd(app_handle: tauri::AppHandle, state: tauri::State<DbState>)
     if previews_dir.exists() {
         fs::remove_dir_all(&previews_dir).map_err(|e| e.to_string())?;
     }
-    let _ = with_worker(&app_handle, &app_handle.state::<MediaWorkerState>(), |worker| {
-        let resp = worker.request("clear_cache", json!({}))?;
-        if !resp.ok {
-            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
+
+    // Clear media cache if initialized
+    if let Ok(guard) = media_state.inner.lock() {
+        if let Some(media) = guard.as_ref() {
+            media_ops::clear_cache(media);
         }
-        Ok(())
-    });
-    if let Ok(mut guard) = state.db.lock() {
+    }
+
+    // Reset DB state
+    if let Ok(mut guard) = db_state.db.lock() {
+        *guard = None;
+    }
+
+    // Reset media state so key is reloaded on next use
+    if let Ok(mut guard) = media_state.inner.lock() {
         *guard = None;
     }
 
@@ -571,34 +533,22 @@ fn get_diagnostics_cmd(app_handle: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 async fn clear_media_cache_cmd(
     app_handle: tauri::AppHandle,
-    state: tauri::State<'_, MediaWorkerState>,
+    state: tauri::State<'_, MediaState>,
 ) -> Result<(), String> {
     clear_preview_cache(&app_handle);
-    with_worker_async(app_handle, state, move |worker| {
-        let resp = worker.request("clear_cache", json!({}))?;
-        if !resp.ok {
-            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
-        }
-        Ok(())
-    })
-    .await
+
+    let media = get_or_init_media(&app_handle, &state)?;
+    media_ops::clear_cache(&media);
+    Ok(())
 }
 
 #[tauri::command]
 async fn drain_media_evictions_cmd(
     app_handle: tauri::AppHandle,
-    state: tauri::State<'_, MediaWorkerState>,
+    state: tauri::State<'_, MediaState>,
 ) -> Result<Vec<String>, String> {
-    with_worker_async(app_handle, state, move |worker| {
-        let resp = worker.request("drain_evictions", json!({}))?;
-        if !resp.ok {
-            return Err(resp.error.unwrap_or_else(|| "worker error".to_string()));
-        }
-        let payload = resp.payload.ok_or_else(|| "missing payload".to_string())?;
-        let data: media_ipc::EvictionsResponse = serde_json::from_value(payload).map_err(|e| e.to_string())?;
-        Ok(data.sha256s)
-    })
-    .await
+    let media = get_or_init_media(&app_handle, &state)?;
+    Ok(media_ops::drain_evictions(&media))
 }
 
 // ===== Tag Commands =====
@@ -678,12 +628,9 @@ fn list_scrapbook_messages_cmd(
 }
 
 fn main() {
-    if media_worker::maybe_run_worker() {
-        return;
-    }
     tauri::Builder::default()
         .manage(DbState::default())
-        .manage(MediaWorkerState::default())
+        .manage(MediaState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
